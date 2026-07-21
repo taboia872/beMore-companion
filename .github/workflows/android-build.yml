@@ -24,6 +24,7 @@ jobs:
 
       - name: Pre-bundle JS
         run: |
+          mkdir -p android/app/src/main/res/assets
           npx react-native bundle \
             --platform android \
             --dev false \
