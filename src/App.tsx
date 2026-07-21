@@ -1,8 +1,8 @@
 import React, {useState, useEffect} from 'react';
-import {AppSettings} from './src/types';
-import {loadSettings} from './src/data/appSettings';
-import {ChatScreen} from './src/screens/ChatScreen';
-import {SettingsScreen} from './src/screens/SettingsScreen';
+import {AppSettings} from './types';
+import {loadSettings} from './data/appSettings';
+import {ChatScreen} from './screens/ChatScreen';
+import {SettingsScreen} from './screens/SettingsScreen';
 
 type Screen = 'chat' | 'settings';
 
