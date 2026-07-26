@@ -1,4 +1,5 @@
 import React, {useState, useEffect} from 'react';
+import {SafeAreaView, StatusBar} from 'react-native';
 import {AppSettings} from './types';
 import {loadSettings} from './data/appSettings';
 import {ChatScreen} from './screens/ChatScreen';
@@ -16,19 +17,21 @@ export default function App() {
 
   if (!settings) return null;
 
-  if (screen === 'settings') {
-    return (
-      <SettingsScreen
-        settings={settings}
-        onChange={setSettings}
-      />
-    );
-  }
-
   return (
-    <ChatScreen
-      settings={settings}
-      onOpenSettings={() => setScreen('settings')}
-    />
+    <SafeAreaView style={{flex: 1, backgroundColor: '#0d1117'}}>
+      <StatusBar
+        backgroundColor="#0d1117"
+        barStyle="light-content"
+        translucent={false}
+      />
+      {screen === 'settings' ? (
+        <SettingsScreen settings={settings} onChange={setSettings} />
+      ) : (
+        <ChatScreen
+          settings={settings}
+          onOpenSettings={() => setScreen('settings')}
+        />
+      )}
+    </SafeAreaView>
   );
 }

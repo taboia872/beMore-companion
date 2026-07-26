@@ -112,7 +112,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   return (
     <KeyboardAvoidingView
       style={s.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <View style={s.header}>
         <Text style={s.headerTitle}>
           {settings.llm.provider === 'localhost'
