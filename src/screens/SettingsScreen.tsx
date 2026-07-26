@@ -23,9 +23,13 @@ export function SettingsScreen({settings, onChange}: Props) {
     setDraft({...draft, llm: {...draft.llm, ...patch}});
 
   const save = async () => {
-    await saveSettings(draft);
-    onChange(draft);
-    Alert.alert('Salvo', 'Configurações salvas.');
+    try {
+      await saveSettings(draft);
+      onChange(draft);
+      Alert.alert('Salvo', 'Configurações salvas.');
+    } catch (e) {
+      Alert.alert('Erro ao salvar', (e as Error).message ?? String(e));
+    }
   };
 
   return (
