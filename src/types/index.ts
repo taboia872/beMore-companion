@@ -11,6 +11,12 @@ export interface LlmConfig {
 export interface Message {
   role: 'system' | 'user' | 'assistant';
   content: string;
+  /**
+   * Marcador de erro: mensagens com isError=true são renderizadas destacadas
+   * e EXCLUÍDAS do contexto enviado ao LLM na próxima chamada.
+   * Evita poluir o prompt com "Erro: ..." que vira contexto para o modelo.
+   */
+  isError?: boolean;
 }
 
 export interface AppSettings {

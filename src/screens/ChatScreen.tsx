@@ -44,10 +44,14 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
       const reply = await generateResponse(context, settings.llm);
       setMessages([...newMsgs, {role: 'assistant', content: reply}]);
     } catch (e) {
-      Alert.alert('Erro', String((e as Error).message));
+      // Mensagem de erro fica visivel no chat mas marcada com isError,
+      // entao LlmService a exclui do contexto enviado ao modelo na
+      // proxima chamada (nao polui o prompt com "Erro: ...").
+      const errMsg = (e as Error).message ?? String(e);
+      Alert.alert('Erro', errMsg);
       setMessages([
         ...newMsgs,
-        {role: 'assistant', content: `Erro: ${(e as Error).message}`},
+        {role: 'assistant', content: `⚠️ ${errMsg}`, isError: true},
       ]);
     } finally {
       setLoading(false);
@@ -55,7 +59,15 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   };
 
   const renderItem = ({item}: {item: Message}) => (
-    <View style={[s.bubble, item.role === 'user' ? s.bubbleUser : s.bubbleBot]}>
+    <View
+      style={[
+        s.bubble,
+        item.role === 'user'
+          ? s.bubbleUser
+          : item.isError
+            ? s.bubbleError
+            : s.bubbleBot,
+      ]}>
       <Text style={s.bubbleText}>{item.content}</Text>
     </View>
   );
@@ -121,6 +133,7 @@ const s = StyleSheet.create({
   bubble: {maxWidth: '85%', padding: 12, borderRadius: 12, marginBottom: 8},
   bubbleUser: {backgroundColor: '#1f6feb', alignSelf: 'flex-end'},
   bubbleBot: {backgroundColor: '#161b22', alignSelf: 'flex-start'},
+  bubbleError: {backgroundColor: '#3d1f1f', alignSelf: 'flex-start', borderWidth: 1, borderColor: '#6e232e'},
   bubbleText: {color: '#fff', fontSize: 15},
   inputRow: {
     flexDirection: 'row',

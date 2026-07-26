@@ -1,13 +1,22 @@
 import { LlmConfig, Message } from '../types';
 
+/**
+ * Filtra mensagens marcadas como erro (isError) do contexto enviado ao LLM.
+ * Mensagens de erro são feedback visual local — não devem virar prompt.
+ */
+function sanitizeContext(messages: Message[]): Message[] {
+  return messages.filter(m => !m.isError);
+}
+
 export async function generateResponse(
   messages: Message[],
   config: LlmConfig,
 ): Promise<string> {
+  const cleanMessages = sanitizeContext(messages);
   if (config.provider === 'localhost') {
-    return fetchNetwork(messages, config);
+    return fetchNetwork(cleanMessages, config);
   }
-  return fetchLocalModel(messages, config);
+  return fetchLocalModel(cleanMessages, config);
 }
 
 async function fetchNetwork(messages: Message[], config: LlmConfig): Promise<string> {
@@ -37,7 +46,7 @@ async function fetchNetwork(messages: Message[], config: LlmConfig): Promise<str
 }
 
 async function fetchLocalModel(messages: Message[], config: LlmConfig): Promise<string> {
-  // Integração com llama.rn 0.9.0 — implementado quando baixar modelo GGUF
+  // Integração com llama.rn — implementado quando baixar modelo GGUF
   if (!config.localModelPath) throw new Error('Nenhum modelo local baixado');
   throw new Error('Local model ainda não implementado');
 }
