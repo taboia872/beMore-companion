@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     apiKey: '',
     model: 'llama3',
   },
+  sttModelPath: '',  // vazio: STT desabilitado até usuário apontar para modelo Whisper
 };
 
 export async function loadSettings(): Promise<AppSettings> {

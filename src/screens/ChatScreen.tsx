@@ -13,6 +13,7 @@ import {
 import {AppSettings, Message} from '../types';
 import {generateResponse} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
+import {useWhisper} from '../hooks/useWhisper';
 
 interface Props {
   settings: AppSettings;
@@ -28,6 +29,9 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   // Gravador de audio (F1-03). Por enquanto sem STT: botao mic
   // alterna start/stop, feedback visual via status. Transcricao vem no F1-05.
   const recorder = useRecorder();
+
+  // Transcrição on-device via whisper.rn (F1-05). Carrega modelo lazy.
+  const whisper = useWhisper();
 
   useEffect(() => {
     listRef.current?.scrollToEnd({animated: true});
@@ -67,9 +71,23 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     if (recorder.status === 'recording') {
       const path = await recorder.stop();
       if (path) {
-        // Placeholder: exibe o caminho do wav gerado. Quando STT (F1-05) entrar,
-        // aqui vira transliteration -> setInput(transcribed text).
-        Alert.alert('Audio gravado', 'Arquivo: ' + path);
+        // Transcrição on-device via whisper.rn. Se sttModelPath não configurado,
+        // exibe erro amigável sem crashar o app.
+        if (!settings.sttModelPath) {
+          Alert.alert(
+            'STT não configurado',
+            'Defina o caminho do modelo Whisper em Settings para transcrever voz.',
+          );
+          return;
+        }
+        const transcript = await whisper.transcribe(path, settings.sttModelPath ?? '');
+        if (transcript && transcript.trim()) {
+          setInput(transcript.trim());
+        } else if (whisper.errorMessage) {
+          Alert.alert('Transcrição falhou', whisper.errorMessage);
+        } else {
+          Alert.alert('Vazio', 'Nenhuma fala detectada no áudio.');
+        }
       }
     } else if (recorder.status === 'idle' || recorder.status === 'error') {
       await recorder.start();

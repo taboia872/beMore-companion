@@ -101,6 +101,20 @@ export function SettingsScreen({settings, onChange}: Props) {
         </>
       )}
 
+      <Text style={s.section}>STT (Whisper)</Text>
+      <Text style={s.hint}>
+        Caminho do modelo Whisper GGUF para transcrição de voz on-device.
+        Deixe vazio para desativar. Ex: ggml-tiny.bin (~75MB).
+      </Text>
+      <TextInput
+        style={s.input}
+        value={draft.sttModelPath ?? ''}
+        placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
+        autoCapitalize="none"
+        autoCorrect={false}
+        onChangeText={v => setDraft({...draft, sttModelPath: v})}
+      />
+
       <Text style={s.section}>System Prompt</Text>
       <TextInput
         style={[s.input, s.textarea]}
