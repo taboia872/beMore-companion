@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import {AppSettings, Message} from '../types';
 import {generateResponse} from '../services/LlmService';
+import {useRecorder} from '../hooks/useRecorder';
 
 interface Props {
   settings: AppSettings;
@@ -23,6 +24,10 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
+
+  // Gravador de audio (F1-03). Por enquanto sem STT: botao mic
+  // alterna start/stop, feedback visual via status. Transcricao vem no F1-05.
+  const recorder = useRecorder();
 
   useEffect(() => {
     listRef.current?.scrollToEnd({animated: true});
@@ -56,6 +61,20 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toggleMic = async () => {
+    if (recorder.status === 'recording') {
+      const path = await recorder.stop();
+      if (path) {
+        // Placeholder: exibe o caminho do wav gerado. Quando STT (F1-05) entrar,
+        // aqui vira transliteration -> setInput(transcribed text).
+        Alert.alert('Audio gravado', 'Arquivo: ' + path);
+      }
+    } else if (recorder.status === 'idle' || recorder.status === 'error') {
+      await recorder.start();
+    }
+    // status === 'processing': ignora toques intermediarios.
   };
 
   const renderItem = ({item}: {item: Message}) => (
@@ -106,6 +125,25 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
           editable={!loading}
         />
         <TouchableOpacity
+          style={[
+            s.micBtn,
+            recorder.status === 'recording' && s.micBtnActive,
+            recorder.status === 'error' && s.micBtnError,
+            recorder.status === 'processing' && s.micBtnDisabled,
+          ]}
+          onPress={toggleMic}
+          disabled={recorder.status === 'processing'}>
+          <Text style={s.micText}>
+            {recorder.status === 'recording'
+              ? '⏹'
+              : recorder.status === 'processing'
+                ? '…'
+                : recorder.status === 'error'
+                  ? '⚠'
+                  : '🎤'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
           style={[s.sendBtn, loading && s.sendBtnDisabled]}
           onPress={send}
           disabled={loading}>
@@ -151,7 +189,19 @@ const s = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 15,
   },
-  sendBtn: {
+  micBtn: {
+    backgroundColor: '#21262d',
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micBtnActive: {backgroundColor: '#da3633'},
+  micBtnError: {backgroundColor: '#3d1f1f', borderWidth: 1, borderColor: '#6e232e'},
+  micBtnDisabled: {opacity: 0.5},
+  micText: {color: '#fff', fontSize: 18},
+    sendBtn: {
     backgroundColor: '#238636',
     width: 44,
     height: 44,
