@@ -22,4 +22,11 @@ export interface Message {
 export interface AppSettings {
   systemPrompt: string;
   llm: LlmConfig;
+  /**
+   * Caminho no device para o modelo Whisper GGUF (STT on-device).
+   * Se vazio, transcrição de voz fica indisponível — botão mic mostra
+   * mensagem explicativa em vez de crashar.
+   * Ex: /data/data/com.bemore.companion/files/models/ggml-tiny.bin
+   */
+  sttModelPath?: string;
 }
