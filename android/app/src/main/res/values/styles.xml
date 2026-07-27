@@ -2,9 +2,9 @@
 
     <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:windowBackground">#0d1117</item>
-        <!-- Diz ao Android: a area do app NAO se estende sob a status bar nem
-             a barra de navegacao. A UI comeca abaixo delas. Sem essa flag,
-             Theme.AppCompat.NoActionBar assume edge-to-edge implicito. -->
+        <!-- Android 15 (API 35) fuerza edge-to-edge por defecto.
+             Desactivamos explicitamente para que la UI respete las barras del sistema. -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
         <item name="android:windowTranslucentStatus">false</item>
         <item name="android:windowTranslucentNavigation">false</item>
         <item name="android:fitsSystemWindows">true</item>

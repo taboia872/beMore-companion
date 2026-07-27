@@ -6,9 +6,10 @@ import {
   TouchableOpacity,
   FlatList,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
   Alert,
+  SafeAreaView,
+  StatusBar,
 } from 'react-native';
 import {AppSettings, Message} from '../types';
 import {generateResponse} from '../services/LlmService';
@@ -26,11 +27,10 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   const [loading, setLoading] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
 
-  // Gravador de audio (F1-03). Por enquanto sem STT: botao mic
-  // alterna start/stop, feedback visual via status. Transcricao vem no F1-05.
+  // Gravador de audio. Botao mic alterna start/stop.
   const recorder = useRecorder();
 
-  // Transcrição on-device via whisper.rn (F1-05). Carrega modelo lazy.
+  // Transcrição on-device via whisper.rn. Carrega modelo lazy.
   const whisper = useWhisper();
 
   useEffect(() => {
@@ -53,9 +53,6 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
       const reply = await generateResponse(context, settings.llm);
       setMessages([...newMsgs, {role: 'assistant', content: reply}]);
     } catch (e) {
-      // Mensagem de erro fica visivel no chat mas marcada com isError,
-      // entao LlmService a exclui do contexto enviado ao modelo na
-      // proxima chamada (nao polui o prompt com "Erro: ...").
       const errMsg = (e as Error).message ?? String(e);
       Alert.alert('Erro', errMsg);
       setMessages([
@@ -71,8 +68,6 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     if (recorder.status === 'recording') {
       const path = await recorder.stop();
       if (path) {
-        // Transcrição on-device via whisper.rn. Se sttModelPath não configurado,
-        // exibe erro amigável sem crashar o app.
         if (!settings.sttModelPath) {
           Alert.alert(
             'STT não configurado',
@@ -92,7 +87,6 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     } else if (recorder.status === 'idle' || recorder.status === 'error') {
       await recorder.start();
     }
-    // status === 'processing': ignora toques intermediarios.
   };
 
   const renderItem = ({item}: {item: Message}) => (
@@ -109,21 +103,32 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     </View>
   );
 
+  const micIcon = () => {
+    if (recorder.status === 'recording') return '⏹';
+    if (recorder.status === 'processing') return '…';
+    if (recorder.status === 'error') return '⚠';
+    return '🎤';
+  };
+
   return (
-    <KeyboardAvoidingView
-      style={s.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <SafeAreaView style={s.safe}>
+      <StatusBar
+        backgroundColor="#0d1117"
+        barStyle="light-content"
+        translucent={false}
+      />
+
+      {/* Painel superior */}
       <View style={s.header}>
-        <Text style={s.headerTitle}>
-          {settings.llm.provider === 'localhost'
-            ? 'Localhost'
-            : 'Local'}
+        <Text style={s.headerTitle} numberOfLines={1}>
+          {settings.llm.model || 'modelo'}
         </Text>
-        <TouchableOpacity onPress={onOpenSettings}>
+        <TouchableOpacity onPress={onOpenSettings} style={s.iconBtn}>
           <Text style={s.headerBtn}>⚙</Text>
         </TouchableOpacity>
       </View>
 
+      {/* Area de mensagens */}
       <FlatList
         ref={listRef}
         data={messages}
@@ -131,8 +136,23 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
         keyExtractor={(_, i) => String(i)}
         contentContainerStyle={s.list}
         onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
+        keyboardShouldPersistTaps="handled"
       />
 
+      {/* Status do gravador / transcrição */}
+      {(recorder.status === 'processing' || whisper.status === 'transcribing') && (
+        <View style={s.statusBar}>
+          <Text style={s.statusText}>
+            {whisper.status === 'transcribing'
+              ? 'Transcrevendo…'
+              : recorder.status === 'processing'
+                ? 'Processando áudio…'
+                : ''}
+          </Text>
+        </View>
+      )}
+
+      {/* Barra de texto inferior */}
       <View style={s.inputRow}>
         <TextInput
           style={s.input}
@@ -141,6 +161,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
           placeholder="Mensagem..."
           placeholderTextColor="#6e7681"
           editable={!loading}
+          multiline
         />
         <TouchableOpacity
           style={[
@@ -151,15 +172,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
           ]}
           onPress={toggleMic}
           disabled={recorder.status === 'processing'}>
-          <Text style={s.micText}>
-            {recorder.status === 'recording'
-              ? '⏹'
-              : recorder.status === 'processing'
-                ? '…'
-                : recorder.status === 'error'
-                  ? '⚠'
-                  : '🎤'}
-          </Text>
+          <Text style={s.micText}>{micIcon()}</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[s.sendBtn, loading && s.sendBtnDisabled]}
@@ -168,35 +181,88 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
           <Text style={s.sendText}>{loading ? '...' : '➤'}</Text>
         </TouchableOpacity>
       </View>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
 const s = StyleSheet.create({
-  container: {flex: 1, backgroundColor: '#0d1117'},
+  safe: {
+    flex: 1,
+    backgroundColor: '#0d1117',
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#21262d',
+    backgroundColor: '#0d1117',
   },
-  headerTitle: {color: '#8b949e', fontSize: 14, fontWeight: '600'},
-  headerBtn: {color: '#8b949e', fontSize: 22},
-  list: {padding: 16},
-  bubble: {maxWidth: '85%', padding: 12, borderRadius: 12, marginBottom: 8},
-  bubbleUser: {backgroundColor: '#1f6feb', alignSelf: 'flex-end'},
-  bubbleBot: {backgroundColor: '#161b22', alignSelf: 'flex-start'},
-  bubbleError: {backgroundColor: '#3d1f1f', alignSelf: 'flex-start', borderWidth: 1, borderColor: '#6e232e'},
-  bubbleText: {color: '#fff', fontSize: 15},
+  headerTitle: {
+    color: '#8b949e',
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: 12,
+  },
+  iconBtn: {
+    padding: 4,
+  },
+  headerBtn: {
+    color: '#8b949e',
+    fontSize: 22,
+  },
+  list: {
+    padding: 16,
+    flexGrow: 1,
+    justifyContent: 'flex-end',
+  },
+  bubble: {
+    maxWidth: '85%',
+    padding: 12,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  bubbleUser: {
+    backgroundColor: '#1f6feb',
+    alignSelf: 'flex-end',
+  },
+  bubbleBot: {
+    backgroundColor: '#161b22',
+    alignSelf: 'flex-start',
+  },
+  bubbleError: {
+    backgroundColor: '#3d1f1f',
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: '#6e232e',
+  },
+  bubbleText: {
+    color: '#fff',
+    fontSize: 15,
+  },
+  statusBar: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    backgroundColor: '#161b22',
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+  },
+  statusText: {
+    color: '#8b949e',
+    fontSize: 13,
+    textAlign: 'center',
+  },
   inputRow: {
     flexDirection: 'row',
+    alignItems: 'flex-end',
     padding: 12,
     gap: 8,
     borderTopWidth: 1,
     borderTopColor: '#21262d',
+    backgroundColor: '#0d1117',
   },
   input: {
     flex: 1,
@@ -206,6 +272,8 @@ const s = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
     fontSize: 15,
+    maxHeight: 120,
+    minHeight: 44,
   },
   micBtn: {
     backgroundColor: '#21262d',
@@ -215,11 +283,22 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  micBtnActive: {backgroundColor: '#da3633'},
-  micBtnError: {backgroundColor: '#3d1f1f', borderWidth: 1, borderColor: '#6e232e'},
-  micBtnDisabled: {opacity: 0.5},
-  micText: {color: '#fff', fontSize: 18},
-    sendBtn: {
+  micBtnActive: {
+    backgroundColor: '#da3633',
+  },
+  micBtnError: {
+    backgroundColor: '#3d1f1f',
+    borderWidth: 1,
+    borderColor: '#6e232e',
+  },
+  micBtnDisabled: {
+    opacity: 0.5,
+  },
+  micText: {
+    color: '#fff',
+    fontSize: 18,
+  },
+  sendBtn: {
     backgroundColor: '#238636',
     width: 44,
     height: 44,
@@ -227,6 +306,11 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendBtnDisabled: {opacity: 0.5},
-  sendText: {color: '#fff', fontSize: 18},
+  sendBtnDisabled: {
+    opacity: 0.5,
+  },
+  sendText: {
+    color: '#fff',
+    fontSize: 18,
+  },
 });
