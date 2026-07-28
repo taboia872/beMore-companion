@@ -22,6 +22,9 @@ react {
 
     /* Autolinking */
     autolinkLibrariesWithApp()
+
+/* Material Design 3 icons font */
+apply from: file("../../node_modules/@react-native-vector-icons/material-icons/fonts.gradle")
 }
 
 /**

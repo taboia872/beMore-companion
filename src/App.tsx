@@ -27,7 +27,11 @@ export default function App() {
         translucent={false}
       />
       {screen === 'settings' ? (
-        <SettingsScreen settings={settings} onChange={setSettings} />
+        <SettingsScreen
+          settings={settings}
+          onChange={setSettings}
+          onBack={() => setScreen('chat')}
+        />
       ) : (
         <ChatScreen
           settings={settings}
