@@ -1,4 +1,5 @@
 import React, {useState, useEffect} from 'react';
+import {StatusBar, View} from 'react-native';
 import {AppSettings} from './types';
 import {loadSettings} from './data/appSettings';
 import {ChatScreen} from './screens/ChatScreen';
@@ -14,21 +15,25 @@ export default function App() {
     loadSettings().then(setSettings);
   }, []);
 
-  if (!settings) return null;
-
-  if (screen === 'settings') {
-    return (
-      <SettingsScreen
-        settings={settings}
-        onChange={setSettings}
-      />
-    );
+  if (!settings) {
+    return <View style={{flex: 1, backgroundColor: '#0d1117'}} />;
   }
 
   return (
-    <ChatScreen
-      settings={settings}
-      onOpenSettings={() => setScreen('settings')}
-    />
+    <View style={{flex: 1, backgroundColor: '#0d1117'}}>
+      <StatusBar
+        backgroundColor="#0d1117"
+        barStyle="light-content"
+        translucent={false}
+      />
+      {screen === 'settings' ? (
+        <SettingsScreen settings={settings} onChange={setSettings} />
+      ) : (
+        <ChatScreen
+          settings={settings}
+          onOpenSettings={() => setScreen('settings')}
+        />
+      )}
+    </View>
   );
 }

@@ -1,5 +1,15 @@
 <resources>
+
     <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
         <item name="android:windowBackground">#0d1117</item>
+        <!-- Android 15 (API 35) fuerza edge-to-edge por defecto.
+             Desactivamos explicitamente para que la UI respete las barras del sistema. -->
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowTranslucentNavigation">false</item>
+        <item name="android:fitsSystemWindows">true</item>
+        <item name="android:statusBarColor">#0d1117</item>
+        <item name="android:navigationBarColor">#0d1117</item>
     </style>
+
 </resources>
