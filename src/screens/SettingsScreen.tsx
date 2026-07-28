@@ -16,6 +16,7 @@ import {
 import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettings, LlmProvider} from '../types';
 import {saveSettings} from '../data/appSettings';
+import {shortModelName} from '../utils/modelName';
 
 interface Props {
   settings: AppSettings;
@@ -260,7 +261,7 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
                   style={s.modelItem}
                   onPress={() => pickModel(item)}>
                   <Icon name="memory" size={20} color="#58a6ff" />
-                  <Text style={s.modelItemText}>{item}</Text>
+                  <Text style={s.modelItemText} numberOfLines={1}>{shortModelName(item)}</Text>
                   {item === draft.llm.model && (
                     <Icon name="check" size={20} color="#3fb950" />
                   )}

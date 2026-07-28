@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   FlatList,
   StyleSheet,
-  Platform,
   Alert,
   SafeAreaView,
   StatusBar,
@@ -17,14 +16,16 @@ import {AppSettings, Message} from '../types';
 import {generateResponse} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
+import {shortModelName} from '../utils/modelName';
 
 interface Props {
   settings: AppSettings;
+  messages: Message[];
+  setMessages: (updater: (prev: Message[]) => Message[]) => void;
   onOpenSettings: () => void;
 }
 
-export function ChatScreen({settings, onOpenSettings}: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const listRef = useRef<FlatList<Message>>(null);
@@ -40,7 +41,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     if (!input.trim() || loading) return;
     const userMsg: Message = {role: 'user', content: input.trim()};
     const newMsgs = [...messages, userMsg];
-    setMessages(newMsgs);
+    setMessages(() => newMsgs);
     setInput('');
     setLoading(true);
 
@@ -50,11 +51,11 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
         ...newMsgs,
       ];
       const reply = await generateResponse(context, settings.llm);
-      setMessages([...newMsgs, {role: 'assistant', content: reply}]);
+      setMessages(() => [...newMsgs, {role: 'assistant', content: reply}]);
     } catch (e) {
       const errMsg = (e as Error).message ?? String(e);
       Alert.alert('Erro', errMsg);
-      setMessages([
+      setMessages(() => [
         ...newMsgs,
         {role: 'assistant', content: `⚠ ${errMsg}`, isError: true},
       ]);
@@ -64,17 +65,41 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
   };
 
   const toggleMic = async () => {
+    // Checagem pré-gravação: STT não configurado? Avisa ANTES de gravar,
+    // em vez de iniciar e falhar depois —  evita a sensação de "travou".
+    if (recorder.status === 'idle' || recorder.status === 'error') {
+      if (!settings.sttModelPath?.trim()) {
+        Alert.alert(
+          'STT não configurado',
+          'Para usar o microfone, defina o caminho do modelo Whisper em Settings.',
+        );
+        return;
+      }
+      try {
+        await recorder.start();
+        if (recorder.errorMessage) {
+          Alert.alert('Microfone indisponível', recorder.errorMessage);
+        }
+      } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        Alert.alert('Erro ao iniciar microfone', msg);
+      }
+      return;
+    }
+    // Estado recording → parar e transcrever
     if (recorder.status === 'recording') {
-      const path = await recorder.stop();
-      if (path) {
-        if (!settings.sttModelPath) {
+      try {
+        const path = await recorder.stop();
+        if (!path) return;
+        if (!settings.sttModelPath?.trim()) {
+          // Não deve chegar aqui (checamos antes de iniciar), mas defensive.
           Alert.alert(
             'STT não configurado',
             'Defina o caminho do modelo Whisper em Settings para transcrever voz.',
           );
           return;
         }
-        const transcript = await whisper.transcribe(path, settings.sttModelPath ?? '');
+        const transcript = await whisper.transcribe(path, settings.sttModelPath);
         if (transcript && transcript.trim()) {
           setInput(transcript.trim());
         } else if (whisper.errorMessage) {
@@ -82,9 +107,10 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
         } else {
           Alert.alert('Vazio', 'Nenhuma fala detectada no áudio.');
         }
+      } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        Alert.alert('Erro no microfone', msg);
       }
-    } else if (recorder.status === 'idle' || recorder.status === 'error') {
-      await recorder.start();
     }
   };
 
@@ -115,6 +141,8 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     return '#8b949e';
   };
 
+  const headerTitle = shortModelName(settings.llm.model) || 'modelo';
+
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar
@@ -126,7 +154,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
       {/* Painel superior */}
       <View style={s.header}>
         <Text style={s.headerTitle} numberOfLines={1}>
-          {settings.llm.model || 'modelo'}
+          {headerTitle}
         </Text>
         <TouchableOpacity onPress={onOpenSettings} style={s.iconBtn}>
           <Icon name="settings" size={24} color="#8b949e" />
@@ -156,17 +184,8 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
         </View>
       )}
 
-      {/* Barra de texto inferior */}
-      <View style={s.inputRow}>
-        <TextInput
-          style={s.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Mensagem..."
-          placeholderTextColor="#aab2bc"
-          editable={!loading}
-          multiline
-        />
+      {/* Input bar */}
+      <View style={s.inputBar}>
         <TouchableOpacity
           style={[
             s.micBtn,
@@ -178,6 +197,16 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
           disabled={recorder.status === 'processing'}>
           <Icon name={micIconName()} size={22} color={micIconColor()} />
         </TouchableOpacity>
+
+        <TextInput
+          style={s.input}
+          value={input}
+          onChangeText={setInput}
+          placeholder="Mensagem..."
+          placeholderTextColor="#aab2bc"
+          multiline
+        />
+
         <TouchableOpacity
           style={[s.sendBtn, loading && s.sendBtnDisabled]}
           onPress={send}
@@ -192,6 +221,7 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     </SafeAreaView>
   );
 }
+
 
 const s = StyleSheet.create({
   safe: {
@@ -259,33 +289,23 @@ const s = StyleSheet.create({
     color: '#58a6ff',
     fontSize: 13,
   },
-  inputRow: {
+  inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
-    padding: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderTopWidth: 1,
     borderTopColor: '#21262d',
     backgroundColor: '#0d1117',
-  },
-  input: {
-    flex: 1,
-    color: '#e6edf3',
-    minHeight: 40,
-    maxHeight: 120,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: '#161b22',
-    borderRadius: 20,
-    fontSize: 15,
+    gap: 8,
   },
   micBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
     backgroundColor: '#21262d',
-    alignItems: 'center',
     justifyContent: 'center',
+    alignItems: 'center',
   },
   micBtnActive: {
     backgroundColor: '#da3633',
@@ -298,23 +318,26 @@ const s = StyleSheet.create({
   micBtnDisabled: {
     opacity: 0.5,
   },
-  micText: {
-    color: '#8b949e',
-    fontSize: 20,
+  input: {
+    flex: 1,
+    minHeight: 44,
+    maxHeight: 120,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 22,
+    backgroundColor: '#161b22',
+    color: '#e6edf3',
+    fontSize: 15,
   },
   sendBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
     backgroundColor: '#1f6feb',
-    alignItems: 'center',
     justifyContent: 'center',
+    alignItems: 'center',
   },
   sendBtnDisabled: {
     opacity: 0.5,
-  },
-  sendText: {
-    color: '#fff',
-    fontSize: 18,
   },
 });

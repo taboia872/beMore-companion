@@ -3,6 +3,9 @@ package com.bemore.companion
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.*
 import java.io.File
 import java.io.FileOutputStream
@@ -38,6 +41,18 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
         try {
             if (isRecording) {
                 promise.reject("ALREADY_RECORDING", "Already recording")
+                return
+            }
+
+            // Defensive: checar permissão runtime ANTES de instanciar AudioRecord.
+            // Em Android 6+ (API 23+) AudioRecord sem permissão pode lançar
+            // SecurityException silenciosa (crash nativo em alguns dispositivos).
+            // O hook JS também pede permissão, mas NEVER trust JS-side alone.
+            val permGranted = ContextCompat.checkSelfPermission(
+                reactApplicationContext, Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!permGranted) {
+                promise.reject("PERMISSION_DENIED", "Permissão RECORD_AUDIO não concedida.")
                 return
             }
 
