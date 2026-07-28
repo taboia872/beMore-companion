@@ -102,11 +102,11 @@ export function ChatScreen({settings, onOpenSettings}: Props) {
     </View>
   );
 
-  const micIconName = (): string => {
-    if (recorder.status === 'recording') return 'stop';
-    if (recorder.status === 'processing') return 'hourglass-top';
-    if (recorder.status === 'error') return 'warning';
-    return 'mic';
+  const micIconName = () => {
+    if (recorder.status === 'recording') return 'stop' as const;
+    if (recorder.status === 'processing') return 'hourglass-top' as const;
+    if (recorder.status === 'error') return 'warning' as const;
+    return 'mic' as const;
   };
 
   const micIconColor = (): string => {
