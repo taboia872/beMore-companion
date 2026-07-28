@@ -13,7 +13,7 @@ import {
   Modal,
   FlatList,
 } from 'react-native';
-import Icon from '@react-native-vector-icons/material-icons';
+import Icon from '@react-native-vector-icons/material-icons/static';
 import {AppSettings, LlmProvider} from '../types';
 import {saveSettings} from '../data/appSettings';
 
