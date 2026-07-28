@@ -12,7 +12,7 @@ import {
   StatusBar,
   ActivityIndicator,
 } from 'react-native';
-import Icon from '@react-native-vector-icons/material-icons/static';
+import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettings, Message} from '../types';
 import {generateResponse} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
