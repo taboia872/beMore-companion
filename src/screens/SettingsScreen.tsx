@@ -18,7 +18,17 @@ import {AppSettings, LlmProvider} from '../types';
 import {saveSettings} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
 
-interface Props {
+/**
+ * Nome do ícone do checkbox de streaming conforme estado ligado/desligado.
+ * as const em cada último p/ satisfazer tipagem estrita do prop name do <Icon>
+ * (v13 scoped exige union MaterialIconsIconName; ternary nao aceita as const).
+ */
+function streamingCheckboxIcon(on: boolean) {
+  if (on) return 'check-box' as const;
+  return 'check-box-outline-blank' as const;
+}
+
+interface Props {interface Props {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onClose: () => void;
@@ -277,7 +287,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               Receber respostas em tempo real
             </Text>
             <Icon
-              name={(draft.streamingEnabled !== false ? 'check-box' : 'check-box-outline-blank') as const}
+              name={streamingCheckboxIcon(draft.streamingEnabled !== false)}
               size={24}
               color={draft.streamingEnabled !== false ? '#3fb950' : '#8b949e'}
             />

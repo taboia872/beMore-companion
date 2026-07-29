@@ -269,6 +269,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     });
   };
 
+  // Nome do ícone de thinking conforme estado do toggle (lâmpada acesa/apagada).
+  // as const em cada return para satisfazer a tipagem estrita do prop name
+  // do <Icon> (v13 scoped exige union MaterialIconsIconName).
+  const thinkingIconName = () => {
+    if (thinkingMode) return 'lightbulb' as const;
+    return 'lightbulb-outline' as const;
+  };
+
   const renderMessage = ({item}: {item: Message}) => {
     const isUser = item.role === 'user';
     const isStreamingMsg =
@@ -387,7 +395,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             onPress={() => setThinkingMode(v => !v)}
             hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
             <Icon
-              name={(thinkingMode ? 'lightbulb' : 'lightbulb-outline') as const}
+              name={thinkingIconName()}
               size={22}
               color={thinkingMode ? '#58a6ff' : '#8b949e'}
             />
