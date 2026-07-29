@@ -22,23 +22,36 @@ A maioria dos apps de IA é uma casca fina sobre o servidor de outra pessoa: cad
 
 ## Estado atual do projeto
 
-🔴 **Pré-alfa — scaffold em construção.** Ainda não serve para uso diário.
+🟡 **Pré-alfa — chat funcional com servidores externos.** O app já conversa de verdade quando você aponta pra um backend na sua LAN (Ollama, LM Studio, llama.cpp server) ou qualquer API OpenAI-compatible. O modo local (GGUF on-device) ainda é stub.
 
-O que já existe e funciona:
-- **Tela de chat** escura e simples, com histórico em memória da sessão.
-- **LlmService** que conversa com qualquer endpoint OpenAI-compatible (`/v1/chat/completions`) — testado com Ollama e LM Studio.
-- **Tela de configurações** persistida em AsyncStorage: tipo de provider (localhost vs. local), URL do servidor, API key, nome do modelo, system prompt.
-- **Módulo nativo `PcmRecorder`** (Kotlin) que grava áudio via `AudioRecord` e salva `.wav` com header RIFF válido — pronto para alimentar um STT, **mas ainda desconectado** da UI.
+### O que funciona hoje
 
-O que está no código mas **não funcional**:
-- `fetchLocalModel` é um stub que só lança `"Local model ainda não implementado"`.
-- `DownloadScreen` existe como placeholder mas não é alcançável por nenhuma rota.
-- O README original listava `whisper.rn`, `llama.rn` e Fish Audio TTS como stack; essas dependências foram removidas temporariamente no commit **B#2** ("remover libs nao usadas") e serão reintroduzidas quando houver UI para usá-las.
+- **Tela de chat** escura, com histórico **que persiste entre trocas de aba** (estado lifted up no `App.tsx`) — virar pra Settings e voltar não destroi mais a conversa.
+- **LlmService** que faz POST `/v1/chat/completions` em qualquer endpoint OpenAI-compatible. Validado pelo usuário com Ollama e servidor externo.
+- **Tela de configurações** persistida em AsyncStorage (`@bemore_settings`):
+  - tipo de provider (localhost vs. local), URL do servidor, API key, nome do modelo, system prompt
+  - **botão "Buscar modelos"** que faz `GET {baseUrl}/models` e abre um modal pra escolher — em vez de digitar o nome à mão
+  -campo "caminho do modelo Whisper" para STT on-device (vazio = STT desabilitado)
+- **Ícones MD3** via `@react-native-vector-icons/material-icons` v13.1.2 (Material Icons genuíno do Google, não mais a versão legacy).
+- **Header do chat** mostra só o nome curto do modelo (basename do `id` completo que o servidor retorna — ex: `llama3.2:3b` em vez de `/home/user/.../llama3.2:3b`).
+- **Microfone defensivo**: checa se o modelo STT está configurado **antes** de iniciar a gravação — sem modelo, mostra Alert em vez de aparentemente travar. O módulo nativo Kotlin também verifica permissão `RECORD_AUDIO` em runtime antes de instanciar `AudioRecord` (não confia só no check do JS).
+- **Módulo nativo `PcmRecorder`** (Kotlin) que grava áudio via `AudioRecord` (16 kHz, mono, PCM 16-bit) e salva `.wav` com header RIFF/WAVE de 44 bytes válido — pronto para alimentar um STT quando integrado.
+- **CI verde**: workflow em GitHub Actions com Node 24 + actions v5, rodando `npm install` → `tsc --noEmit` → `react-native bundle` → `gradlew assembleDebug` → upload do APK como artifact.
 
-Stack técnica real hoje:
-- React Native 0.76.7 (Old Arch ativa; a infraestrutura New Arch — `fabricEnabled`, `DefaultNewArchitectureEntryPoint` — já está plugada em `MainApplication.kt`, basta ligar `newArchEnabled=true` quando fizer sentido).
-- TypeScript, Hermes, Android-only.
-- CI: um workflow que roda `gradlew assembleDebug` para validar o build.
+### O que está no código mas **não funcional**
+
+- `fetchLocalModel` em `LlmService.ts` é um stub que só lança `"Local model ainda não implementado"` — aguardando reintrodução do `llama.rn`.
+- `DownloadScreen.tsx` existe como placeholder mas não é alcançável por nenhuma rota (o `App.tsx` só navega chat ⇄ settings).
+- `SttService.ts` + hook `useWhisper` existem com lazy-load e mensagens amigáveis, mas `whisper.rn` foi removido do `package.json` no commit B#2 e ainda não foi reintroduzido — sem a lib o STT real não transcreve, só exibe a mensagem "defina o caminho do modelo Whisper".
+- O README original listava `whisper.rn`, `llama.rn` e Fish Audio TTS como stack; essas libs foram removidas temporariamente e serão reintroduzidas quando houver UI e modelo real para usá-las.
+
+### Stack técnica real hoje
+
+- **React Native 0.76.7** (Old Arch ativa; a infraestrutura New Arch — `fabricEnabled`, `DefaultNewArchitectureEntryPoint` — já está plugada em `MainApplication.kt`, basta ligar `newArchEnabled=true` quando `llama.rn`/`sherpa-onnx-rn` estiverem prontos).
+- **TypeScript** (strict mode) com `lib: ["es2022", "dom"]` (DOM p/ ter tipos de `fetch`, `Response`, `console`).
+- **Hermes**, Android-only, AsyncStorage p/ settings, sem telemetria.
+- **Ícones**: `@react-native-vector-icons/material-icons` v13.1.2 (import root, não `/static` — Metro 0.81 do RN 0.76 não resolve subpath exports; a lib bundla a fonte `.ttf` via task `copyFonts` no `android/build.gradle` do próprio pacote, linkado por autolink).
+- **CI**: GitHub Actions (`.github/workflows/android-build.yml`) com Node 24 + actions v5 — typecheck → bundle → APK → artifact.
 
 ---
 
@@ -49,14 +62,19 @@ Construção incremental. Sem promessa de datas — isto é projeto de fim de se
 ### 🧱 Fase 1 — O essencial (em andamento)
 Objetivo: **um app de chat funcional com STT interno e múltiplos backends de LLM.**
 
-- [ ] Conectar `PcmRecorderModule` ao JS via `NativeModules` e expor um `AudioService`
-- [ ] Integrar um motor de STT on-device ( candidato: `sherpa-onnx-rn` — Whisper.arw corruptor revisitado)
-- [ ] Reintroduzir `llama.rn` para rodar modelos GGUF localmente e substituir o stub `fetchLocalModel`
+- [x] Conectar `PcmRecorderModule` ao JS via `NativeModules` e expor um `AudioService` — PR #5
+- [x] `tsconfig` com `lib: ["es2022","dom"]` (DOM p/ `fetch`/`Response`/`console`) — PR #5
+- [x] Validação de permissão runtime `RECORD_AUDIO` antes de instanciar `AudioRecord` (kotlin + JS) — PR #6
+- [x] Tratamento de erro de rede sem poluir histórico (`isError` flag nas mensagens de erro) — PR #6
+- [x] Ícones MD3 (`@react-native-vector-icons/material-icons` v13) + botão voltar em Settings + botão "Buscar modelos" — PR #6
+- [x] Histórico de conversa persiste ao trocar de aba (lift state up no `App.tsx`) — PR #6
+- [x] Microfone defensivo: checa modelo STT antes de gravar (em vez de "travar") — PR #6
+- [x] CI completo: `tsc --noEmit` → `react-native bundle` → `gradlew assembleDebug` → upload APK artifact (Node 24 + actions v5) — PR #6
+- [ ] Reintroduzir `whisper.rn` (ou candidato estável) para STT on-device — SttService já existe como wrap defensive, falta a lib
+- [ ] Reintroduzir `llama.rn` e implementar `fetchLocalModel` (rodar modelos GGUF no aparelho)
 - [ ] Tela **Models**: baixar GGUFs (Hugging Face ou URL direta), validar espaço, carregar/descarregar
 - [ ] Roteabilidade real: React Navigation (Native Stack) liberando `DownloadScreen` e futuras telas
-- [ ] Correções imediatas de robustez: `tsconfig` com `lib: ["es2022","dom"]`, tratamento de erro de rede sem poluir histórico, validação de permissão runtime `RECORD_AUDIO`
 - [ ] Estado global com Zustand (a substituir `useState` espalhado)
-- [ ] CI expandir: `tsc --noEmit` + lint, não só build
 
 ### 🧠 Fase 2 — Talentos
 Objetivo: dar memória e ferramentas ao companion, sem abrir mão da privacidade.
@@ -113,23 +131,34 @@ cd android && ./gradlew assembleDebug
 ### Estrutura atual
 ```
 src/
-├── App.tsx              # Root + navegação manual (a ser substituída)
+├── App.tsx              # Root + state lift (messages persiste entre abas)
 ├── data/
-│   └── appSettings.ts   # Persistência de config em AsyncStorage
+│   └── appSettings.ts   # Persistência de config em AsyncStorage (@bemore_settings)
+├── hooks/
+│   ├── useRecorder.ts   # Wrapper sobre PcmRecorder nativo, pede permissão runtime
+│   └── useWhisper.ts    # Lazy-load STT, mensagens amigáveis (defensive)
 ├── screens/
-│   ├── ChatScreen.tsx
-│   ├── DownloadScreen.tsx   # placeholder
-│   └── SettingsScreen.tsx
+│   ├── ChatScreen.tsx       # Chat + header com nome curto do modelo + botões mic/send MD3
+│   ├── DownloadScreen.tsx   # placeholder — a ser conectado via React Navigation
+│   └── SettingsScreen.tsx   # Config + botão "Buscar modelos" + modal de seleção
 ├── services/
-│   └── LlmService.ts    # OpenAI-compatible client (localhost/local)
-└── types/
-    └── index.ts
+│   ├── AudioService.ts  # Ponte JS → NativeModules.PcmRecorder
+│   ├── LlmService.ts    # OpenAI-compatible client (localhost mode funciona; local = stub)
+│   └── SttService.ts    # Wrap whisper.rn (require() dinâmico — não quebra tsc sem a lib)
+├── types/
+│   ├── index.ts
+│   └── react-native-vector-icons.d.ts   # module augmentation p/ import root dos ícones
+└── utils/
+    └── modelName.ts     # shortModelName — basename do id completo retornado pelo servidor
 
 android/app/src/main/java/com/bemore/companion/
 ├── MainActivity.kt
 ├── MainApplication.kt
-├── PcmRecorderModule.kt   # Áudio PCM → WAV, sem dependências externas
+├── PcmRecorderModule.kt   # Áudio PCM → WAV, checa permissão runtime antes de AudioRecord
 └── PcmRecorderPackage.kt
+
+.github/workflows/
+└── android-build.yml      # CI: typecheck → bundle → assembleDebug → upload APK (Node 24)
 ```
 
 ---
