@@ -28,7 +28,7 @@ function streamingCheckboxIcon(on: boolean) {
   return 'check-box-outline-blank' as const;
 }
 
-interface Props {interface Props {
+interface Props {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onClose: () => void;
