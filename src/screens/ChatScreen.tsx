@@ -203,11 +203,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   };
 
   // Nome de ícone do botão mic conforme estado do recorder.
-  const micIconName = (): string => {
-    if (recorder.status === 'recording') return 'stop';
-    if (recorder.status === 'processing') return 'hourglass-top';
-    if (recorder.status === 'error') return 'warning';
-    return 'mic';
+  // Returns usam `as const` p/ produzir literal válido do union
+  // MaterialIconsIconName (~2230 nomes). Sem isso, TS infere `string` e
+  // <Icon name={...}> rejeita (v13 scoped tem tipagem estrita no prop name).
+  const micIconName = () => {
+    if (recorder.status === 'recording') return 'stop' as const;
+    if (recorder.status === 'processing') return 'hourglass-top' as const;
+    if (recorder.status === 'error') return 'warning' as const;
+    return 'mic' as const;
   };
 
   // Botão dinâmico à direita: mic | send | stop (item 8)
