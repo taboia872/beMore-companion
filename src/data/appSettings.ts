@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     model: 'llama3',
   },
   sttModelPath: '',  // vazio: STT desabilitado até usuário apontar para modelo Whisper
+  thinkingEnabled: false,  // toggle do modo thinking no input do chat (item 7)
 };
 
 export async function loadSettings(): Promise<AppSettings> {

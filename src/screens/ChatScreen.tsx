@@ -10,13 +10,21 @@ import {
   SafeAreaView,
   StatusBar,
   ActivityIndicator,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
-import {AppSettings, Message} from '../types';
-import {generateResponse} from '../services/LlmService';
+import {AppSettings, Message, MessageStatus} from '../types';
+import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
-import {shortModelName} from '../utils/modelName';
+import {displayModelName} from '../utils/modelName';
+
+// Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 
 interface Props {
   settings: AppSettings;
@@ -27,8 +35,17 @@ interface Props {
 
 export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  // Modo thinking local ao chat — default vem de settings mas o usuário pode
+  // alternar em runtime sem gravar (item 7).
+  const [thinkingMode, setThinkingMode] = useState(
+    settings.thinkingEnabled ?? false,
+  );
+  // Ids de mensagens com bloco de thinking expandido.
+  const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+
   const listRef = useRef<FlatList<Message>>(null);
+  const assistantIdRef = useRef<string | null>(null);
 
   const recorder = useRecorder();
   const whisper = useWhisper();
@@ -37,36 +54,111 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     listRef.current?.scrollToEnd({animated: true});
   }, [messages]);
 
-  const send = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg: Message = {role: 'user', content: input.trim()};
-    const newMsgs = [...messages, userMsg];
-    setMessages(() => newMsgs);
+  const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  const send = async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
+    if (!text || streaming) return;
+
+    // Injeta instrução de thinking no system prompt dinamicamente quando ativo.
+    // Não persiste em settings — só para essa rodada (item 4 + 7).
+    const sysContent = thinkingMode
+      ? `${settings.systemPrompt}\n\nAntes de responder, pense passo a passo dentro de uma tag <thinking>...</thinking> e depois escreva a resposta final fora da tag.`
+      : settings.systemPrompt;
+
+    const userMsg: Message = {
+      role: 'user',
+      content: text,
+      id: genId(),
+    };
+    const assistantId = genId();
+    const assistantMsg: Message = {
+      role: 'assistant',
+      content: '',
+      thinking: '',
+      status: 'thinking' as MessageStatus,
+      id: assistantId,
+    };
+    const newMsgs = [...messages, userMsg, assistantMsg];
+    // Usa prev p/ não depender do snapshot de messages (race entre render e set).
+    setMessages(prev => [...prev, userMsg, assistantMsg]);
     setInput('');
-    setLoading(true);
+    setStreaming(true);
+    assistantIdRef.current = assistantId;
+
+    // Atualiza a mensagem do assistant in-place por id. Aceita patch direto
+    // OU updater funcional (precisa do estado anterior p/ concatenar tokens).
+    const updateAssistant = (
+      patchOrUpdater: Partial<Message> | ((prev: Message) => Partial<Message>),
+    ) => {
+      setMessages(prev =>
+        prev.map(m => {
+          if (m.id !== assistantId) return m;
+          const patch =
+            typeof patchOrUpdater === 'function'
+              ? patchOrUpdater(m)
+              : patchOrUpdater;
+          return {...m, ...patch};
+        }),
+      );
+    };
 
     try {
       const context: Message[] = [
-        {role: 'system', content: settings.systemPrompt},
-        ...newMsgs,
+        {role: 'system', content: sysContent},
+        ...newMsgs.filter(m => m.id !== assistantId),
       ];
-      const reply = await generateResponse(context, settings.llm);
-      setMessages(() => [...newMsgs, {role: 'assistant', content: reply}]);
+      await streamResponse(context, settings.llm, event => {
+        switch (event.type) {
+          case 'thinking':
+            updateAssistant(prev => ({
+              thinking: (prev.thinking ?? '') + event.delta,
+              status: 'thinking',
+            }));
+            break;
+          case 'token':
+            updateAssistant(prev => ({
+              content: prev.content + event.delta,
+              status: 'streaming',
+            }));
+            break;
+          case 'done':
+            updateAssistant({status: 'done'});
+            break;
+          case 'error':
+            updateAssistant({
+              status: 'error',
+              isError: true,
+              content: `⚠ ${event.message}`,
+            });
+            break;
+          case 'aborted':
+            updateAssistant(prev => ({
+              status: 'done',
+              content: (prev.content || '') + ' *[cancelado]*',
+            }));
+            break;
+        }
+      });
     } catch (e) {
       const errMsg = (e as Error).message ?? String(e);
-      Alert.alert('Erro', errMsg);
-      setMessages(() => [
-        ...newMsgs,
-        {role: 'assistant', content: `⚠ ${errMsg}`, isError: true},
-      ]);
+      updateAssistant({
+        status: 'error',
+        isError: true,
+        content: `⚠ ${errMsg}`,
+      });
     } finally {
-      setLoading(false);
+      setStreaming(false);
+      assistantIdRef.current = null;
     }
   };
 
+  const stopGeneration = () => {
+    abortGeneration();
+    // abortGeneration dispara onabort do XHR -> onEvent('aborted') -> finally.
+  };
+
   const toggleMic = async () => {
-    // Checagem pré-gravação: STT não configurado? Avisa ANTES de gravar,
-    // em vez de iniciar e falhar depois —  evita a sensação de "travou".
     if (recorder.status === 'idle' || recorder.status === 'error') {
       if (!settings.sttModelPath?.trim()) {
         Alert.alert(
@@ -81,18 +173,15 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           Alert.alert('Microfone indisponível', recorder.errorMessage);
         }
       } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        Alert.alert('Erro ao iniciar microfone', msg);
+        Alert.alert('Erro ao iniciar microfone', (e as Error)?.message ?? String(e));
       }
       return;
     }
-    // Estado recording → parar e transcrever
     if (recorder.status === 'recording') {
       try {
         const path = await recorder.stop();
         if (!path) return;
         if (!settings.sttModelPath?.trim()) {
-          // Não deve chegar aqui (checamos antes de iniciar), mas defensive.
           Alert.alert(
             'STT não configurado',
             'Defina o caminho do modelo Whisper em Settings para transcrever voz.',
@@ -108,40 +197,136 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           Alert.alert('Vazio', 'Nenhuma fala detectada no áudio.');
         }
       } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        Alert.alert('Erro no microfone', msg);
+        Alert.alert('Erro no microfone', (e as Error)?.message ?? String(e));
       }
     }
   };
 
-  const renderItem = ({item}: {item: Message}) => (
-    <View
-      style={[
-        s.bubble,
-        item.role === 'user'
-          ? s.bubbleUser
-          : item.isError
-            ? s.bubbleError
-            : s.bubbleBot,
-      ]}>
-      <Text style={s.bubbleText}>{item.content}</Text>
-    </View>
-  );
-
-  const micIconName = () => {
-    if (recorder.status === 'recording') return 'stop' as const;
-    if (recorder.status === 'processing') return 'hourglass-top' as const;
-    if (recorder.status === 'error') return 'warning' as const;
-    return 'mic' as const;
+  // Nome de ícone do botão mic conforme estado do recorder.
+  const micIconName = (): string => {
+    if (recorder.status === 'recording') return 'stop';
+    if (recorder.status === 'processing') return 'hourglass-top';
+    if (recorder.status === 'error') return 'warning';
+    return 'mic';
   };
 
-  const micIconColor = (): string => {
-    if (recorder.status === 'recording') return '#fff';
-    if (recorder.status === 'error') return '#f85149';
-    return '#8b949e';
+  // Botão dinâmico à direita: mic | send | stop (item 8)
+  const renderActionBtn = () => {
+    if (streaming) {
+      return (
+        <TouchableOpacity style={[s.actionBtn, s.actionBtnStop]} onPress={stopGeneration}>
+          <Icon name="stop" size={22} color="#fff" />
+        </TouchableOpacity>
+      );
+    }
+    if (input.trim().length > 0) {
+      return (
+        <TouchableOpacity style={s.actionBtn} onPress={() => send()}>
+          <Icon name="send" size={20} color="#fff" />
+        </TouchableOpacity>
+      );
+    }
+    return (
+      <TouchableOpacity
+        style={[
+          s.actionBtn,
+          s.actionBtnMic,
+          recorder.status === 'recording' && s.actionBtnMicActive,
+          recorder.status === 'error' && s.actionBtnMicError,
+        ]}
+        onPress={toggleMic}
+        disabled={recorder.status === 'processing'}>
+        <Icon
+          name={micIconName()}
+          size={22}
+          color={
+            recorder.status === 'recording'
+              ? '#fff'
+              : recorder.status === 'error'
+                ? '#f85149'
+                : '#8b949e'
+          }
+        />
+      </TouchableOpacity>
+    );
   };
 
-  const headerTitle = shortModelName(settings.llm.model) || 'modelo';
+  const toggleThinkingExpanded = (id: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedThinking(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const renderMessage = ({item}: {item: Message}) => {
+    const isUser = item.role === 'user';
+    const isStreamingMsg =
+      !isUser && (item.status === 'thinking' || item.status === 'streaming');
+    const statusLabel =
+      item.status === 'thinking'
+        ? 'Pensando...'
+        : item.status === 'streaming'
+          ? 'Processando...'
+          : null;
+    const expanded = item.id ? expandedThinking.has(item.id) : false;
+    const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
+
+    return (
+      <View
+        style={[
+          s.bubble,
+          isUser
+            ? s.bubbleUser
+            : item.isError
+              ? s.bubbleError
+              : s.bubbleBot,
+        ]}>
+        {/* status de geração (item 3) */}
+        {statusLabel && (
+          <View style={s.statusRow}>
+            <ActivityIndicator size="small" color="#58a6ff" />
+            <Text style={s.statusText}>{statusLabel}</Text>
+          </View>
+        )}
+        {/* bloco pensamento expansível (item 4) */}
+        {showThinkingToggle && (
+          <TouchableOpacity
+            style={s.thinkingToggle}
+            onPress={() => item.id && toggleThinkingExpanded(item.id)}
+            activeOpacity={0.7}>
+            <Icon
+              name={expanded ? 'expand-less' : 'expand-more'}
+              size={16}
+              color="#8b949e"
+            />
+            <Text style={s.thinkingToggleLabel}>
+              {expanded ? 'Ocultar pensamento' : 'Ver pensamento'}
+            </Text>
+          </TouchableOpacity>
+        )}
+        {showThinkingToggle && expanded && (
+          <View style={s.thinkingBox}>
+            <Text style={s.thinkingText}>{item.thinking}</Text>
+          </View>
+        )}
+        {/* conteúdo principal */}
+        {(item.content || !isStreamingMsg) && (
+          <Text
+            style={[
+              s.bubbleText,
+              isUser && s.bubbleTextUser,
+            ]}>
+            {item.content}
+          </Text>
+        )}
+      </View>
+    );
+  };
+
+  const headerTitle = displayModelName(settings.llm.model) || 'modelo';
 
   return (
     <SafeAreaView style={s.safe}>
@@ -165,15 +350,16 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       <FlatList
         ref={listRef}
         data={messages}
-        renderItem={renderItem}
-        keyExtractor={(_, i) => String(i)}
+        renderItem={renderMessage}
+        keyExtractor={item => item.id ?? `idx-${item.content}`}
         contentContainerStyle={s.list}
         onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
         keyboardShouldPersistTaps="handled"
       />
 
       {/* Status do gravador / transcrição */}
-      {(recorder.status === 'processing' || whisper.status === 'transcribing') && (
+      {(recorder.status === 'processing' ||
+        whisper.status === 'transcribing') && (
         <View style={s.statusBar}>
           <ActivityIndicator size="small" color="#58a6ff" />
           <Text style={s.statusText}>
@@ -184,18 +370,20 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </View>
       )}
 
-      {/* Input bar */}
+      {/* Input bar (item 5 + 7 + 8) */}
       <View style={s.inputBar}>
+        {/* Toggle modo thinking (item 7) */}
         <TouchableOpacity
           style={[
-            s.micBtn,
-            recorder.status === 'recording' && s.micBtnActive,
-            recorder.status === 'error' && s.micBtnError,
-            recorder.status === 'processing' && s.micBtnDisabled,
+            s.thinkingBtn,
+            thinkingMode && s.thinkingBtnActive,
           ]}
-          onPress={toggleMic}
-          disabled={recorder.status === 'processing'}>
-          <Icon name={micIconName()} size={22} color={micIconColor()} />
+          onPress={() => setThinkingMode(v => !v)}>
+          <Icon
+            name="psychology"
+            size={22}
+            color={thinkingMode ? '#58a6ff' : '#8b949e'}
+          />
         </TouchableOpacity>
 
         <TextInput
@@ -205,23 +393,17 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           placeholder="Mensagem..."
           placeholderTextColor="#aab2bc"
           multiline
+          numberOfLines={5}
+          // 5 linhas máx + scroll: limita o takeover da tela (item 5).
+          // textSize ~20px lineHeight → ~100px p/ 5 linhas; deixamos 120 de margem.
+          maxLength={8000}
         />
 
-        <TouchableOpacity
-          style={[s.sendBtn, loading && s.sendBtnDisabled]}
-          onPress={send}
-          disabled={loading}>
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Icon name="send" size={20} color="#fff" />
-          )}
-        </TouchableOpacity>
+        {renderActionBtn()}
       </View>
     </SafeAreaView>
   );
 }
-
 
 const s = StyleSheet.create({
   safe: {
@@ -277,6 +459,45 @@ const s = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
   },
+  bubbleTextUser: {
+    color: '#fff',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  statusText: {
+    color: '#58a6ff',
+    fontSize: 13,
+  },
+  thinkingToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+  },
+  thinkingToggleLabel: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  thinkingBox: {
+    backgroundColor: '#0d1117',
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#21262d',
+  },
+  thinkingText: {
+    color: '#8b949e',
+    fontSize: 12,
+    lineHeight: 16,
+  },
   statusBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -284,10 +505,6 @@ const s = StyleSheet.create({
     paddingVertical: 6,
     backgroundColor: '#161b22',
     gap: 8,
-  },
-  statusText: {
-    color: '#58a6ff',
-    fontSize: 13,
   },
   inputBar: {
     flexDirection: 'row',
@@ -299,7 +516,7 @@ const s = StyleSheet.create({
     backgroundColor: '#0d1117',
     gap: 8,
   },
-  micBtn: {
+  thinkingBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
@@ -307,29 +524,24 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  micBtnActive: {
-    backgroundColor: '#da3633',
-  },
-  micBtnError: {
-    backgroundColor: '#3d1f1f',
+  thinkingBtnActive: {
+    backgroundColor: '#1a2a3d',
     borderWidth: 1,
-    borderColor: '#f85149',
-  },
-  micBtnDisabled: {
-    opacity: 0.5,
+    borderColor: '#58a6ff',
   },
   input: {
     flex: 1,
     minHeight: 44,
-    maxHeight: 120,
+    maxHeight: 120, // ~5 linhas @ 20px lineHeight ~100px; 120 p/ margem scroll interno
     paddingHorizontal: 12,
     paddingVertical: 10,
     borderRadius: 22,
     backgroundColor: '#161b22',
     color: '#e6edf3',
     fontSize: 15,
+    textAlignVertical: 'top',
   },
-  sendBtn: {
+  actionBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
@@ -337,7 +549,18 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  sendBtnDisabled: {
-    opacity: 0.5,
+  actionBtnStop: {
+    backgroundColor: '#da3633',
+  },
+  actionBtnMic: {
+    backgroundColor: '#21262d',
+  },
+  actionBtnMicActive: {
+    backgroundColor: '#da3633',
+  },
+  actionBtnMicError: {
+    backgroundColor: '#3d1f1f',
+    borderWidth: 1,
+    borderColor: '#f85149',
   },
 });

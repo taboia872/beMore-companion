@@ -28,16 +28,34 @@ interface RemoteModel {
   id: string;
 }
 
+interface CardProps {
+  title: string;
+  icon: string; // MaterialIconsIconName válido
+  children: React.ReactNode;
+}
+
+/** Container visual p/ agrupar uma seção de configurações (item 6). */
+function Card({title, icon, children}: CardProps) {
+  return (
+    <View style={s.card}>
+      <View style={s.cardHeader}>
+        <Icon name={icon as any} size={18} color="#58a6ff" />
+        <Text style={s.cardTitle}>{title}</Text>
+      </View>
+      {children}
+    </View>
+  );
+}
+
 export function SettingsScreen({settings, onChange, onBack}: Props) {
   const [draft, setDraft] = useState<AppSettings>(settings);
 
-  // Estado do fetch de modelos
   const [fetchingModels, setFetchingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [showModelsModal, setShowModelsModal] = useState(false);
 
   const updateLlm = (patch: Partial<AppSettings['llm']>) =>
-    setDraft({...draft, llm: {...draft.llm, ...patch}});
+    setDraft(d => ({...d, llm: {...d.llm, ...patch}}));
 
   const save = async () => {
     try {
@@ -49,10 +67,6 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
     }
   };
 
-  /**
-   * Busca modelos disponíveis no servidor (endpoint /models — OpenAI, Ollama, LM Studio, llama.cpp).
-   * URL base precisa estar preenchida. Em caso de erro, exibe mensagem.
-   */
   const fetchModels = async () => {
     if (!draft.llm.baseUrl?.trim()) {
       Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
@@ -102,7 +116,6 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
         translucent={false}
       />
 
-      {/* Cabeçalho com botão voltar */}
       <View style={s.header}>
         <TouchableOpacity onPress={onBack} style={s.backBtn}>
           <Icon name="arrow-back" size={24} color="#e6edf3" />
@@ -111,144 +124,177 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
       </View>
 
       <ScrollView contentContainerStyle={s.container}>
-        {/* Seção LLM */}
-        <Text style={s.section}>LLM</Text>
-        <View style={s.row}>
-          <TouchableOpacity
-            style={[s.tab, draft.llm.provider === 'localhost' && s.tabActive]}
-            onPress={() => updateLlm({provider: 'localhost' as LlmProvider})}>
-            <Icon
-              name="dns"
-              size={18}
-              color={draft.llm.provider === 'localhost' ? '#fff' : '#8b949e'}
-            />
-            <Text
-              style={[
-                s.tabText,
-                draft.llm.provider === 'localhost' && s.tabTextActive,
-              ]}>
-              Localhost
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[s.tab, draft.llm.provider === 'local' && s.tabActive]}
-            onPress={() => updateLlm({provider: 'local' as LlmProvider})}>
-            <Icon
-              name="smartphone"
-              size={18}
-              color={draft.llm.provider === 'local' ? '#fff' : '#8b949e'}
-            />
-            <Text
-              style={[s.tabText, draft.llm.provider === 'local' && s.tabTextActive]}>
-              No dispositivo
-            </Text>
-          </TouchableOpacity>
-        </View>
+        {/* Card: Provedor + dados conforme tipo (item 6 — agrupado) */}
+        <Card title="Modelo de Linguagem" icon="memory">
+          {/* Tabs Online / Local — texto encurtado (item 6) */}
+          <View style={s.row}>
+            <TouchableOpacity
+              style={[s.tab, draft.llm.provider === 'localhost' && s.tabActive]}
+              onPress={() => updateLlm({provider: 'localhost' as LlmProvider})}>
+              <Icon
+                name="dns"
+                size={18}
+                color={draft.llm.provider === 'localhost' ? '#fff' : '#8b949e'}
+              />
+              <Text
+                style={[
+                  s.tabText,
+                  draft.llm.provider === 'localhost' && s.tabTextActive,
+                ]}>
+                Online
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.tab, draft.llm.provider === 'local' && s.tabActive]}
+              onPress={() => updateLlm({provider: 'local' as LlmProvider})}>
+              <Icon
+                name="smartphone"
+                size={18}
+                color={draft.llm.provider === 'local' ? '#fff' : '#8b949e'}
+              />
+              <Text
+                style={[
+                  s.tabText,
+                  draft.llm.provider === 'local' && s.tabTextActive,
+                ]}>
+                Local
+              </Text>
+            </TouchableOpacity>
+          </View>
 
-        {draft.llm.provider === 'localhost' ? (
-          <>
-            <Text style={s.label}>URL do servidor</Text>
-            <TextInput
-              style={s.input}
-              value={draft.llm.baseUrl}
-              placeholder="http://192.168.0.10:11434/v1"
-              placeholderTextColor="#aab2bc"
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={v => updateLlm({baseUrl: v})}
-            />
-            <Text style={s.hint}>Ollama, LM Studio, llama.cpp server, etc.</Text>
-
-            <Text style={s.label}>API Key (opcional)</Text>
-            <TextInput
-              style={s.input}
-              value={draft.llm.apiKey}
-              placeholder="Bearer token"
-              placeholderTextColor="#aab2bc"
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-              onChangeText={v => updateLlm({apiKey: v})}
-            />
-
-            <Text style={s.label}>Modelo</Text>
-            <View style={s.modelRow}>
+          {draft.llm.provider === 'localhost' ? (
+            <>
+              <Text style={s.label}>URL do servidor</Text>
               <TextInput
-                style={[s.input, s.modelInput]}
-                value={draft.llm.model}
-                placeholder="llama3, qwen2.5, etc"
+                style={s.input}
+                value={draft.llm.baseUrl}
+                placeholder="http://192.168.0.10:11434/v1"
                 placeholderTextColor="#aab2bc"
                 autoCapitalize="none"
                 autoCorrect={false}
-                onChangeText={v => updateLlm({model: v})}
+                onChangeText={v => updateLlm({baseUrl: v})}
               />
-              <TouchableOpacity
-                style={s.fetchBtn}
-                onPress={fetchModels}
-                disabled={fetchingModels}>
-                {fetchingModels ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <Icon name="search" size={20} color="#fff" />
-                )}
-              </TouchableOpacity>
-            </View>
-            <Text style={s.hint}>
-              Toque no ícone de busca para listar modelos disponíveis no servidor.
+              <Text style={s.hint}>Ollama, LM Studio, llama.cpp server, etc.</Text>
+
+              <Text style={s.label}>API Key (opcional)</Text>
+              <TextInput
+                style={s.input}
+                value={draft.llm.apiKey}
+                placeholder="Bearer token"
+                placeholderTextColor="#aab2bc"
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                onChangeText={v => updateLlm({apiKey: v})}
+              />
+
+              <Text style={s.label}>Modelo</Text>
+              <View style={s.modelRow}>
+                <TextInput
+                  style={[s.input, s.modelInput]}
+                  value={draft.llm.model}
+                  placeholder="llama3, qwen2.5, etc"
+                  placeholderTextColor="#aab2bc"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={v => updateLlm({model: v})}
+                />
+                <TouchableOpacity
+                  style={s.fetchBtn}
+                  onPress={fetchModels}
+                  disabled={fetchingModels}>
+                  {fetchingModels ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Icon name="search" size={20} color="#fff" />
+                  )}
+                </TouchableOpacity>
+              </View>
+              <Text style={s.hint}>
+                Toque no ícone de busca para listar modelos disponíveis no servidor.
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={s.hint}>
+                Modelo GGUF no dispositivo (llama.rn). Download na tela principal.
+              </Text>
+              <Text style={s.label}>Caminho do modelo</Text>
+              <TextInput
+                style={s.input}
+                value={draft.llm.localModelPath ?? ''}
+                placeholder="/data/.../models/model.gguf"
+                placeholderTextColor="#aab2bc"
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={v => updateLlm({localModelPath: v})}
+              />
+            </>
+          )}
+        </Card>
+
+        {/* Card: Voz (STT) — item 6 container próprio */}
+        <Card title="Voz (STT — Whisper)" icon="mic">
+          <Text style={s.hint}>
+            Caminho do modelo Whisper para transcrição de voz on-device. Deixe vazio
+            para desativar. Ex: ggml-tiny.bin (~75 MB).
+          </Text>
+          <TextInput
+            style={s.input}
+            value={draft.sttModelPath ?? ''}
+            placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
+            placeholderTextColor="#aab2bc"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={v => setDraft({...draft, sttModelPath: v})}
+          />
+        </Card>
+
+        {/* Card: Prompt do Sistema — item 6 container próprio */}
+        <Card title="Prompt do Sistema" icon="edit">
+          <TextInput
+            style={[s.input, s.textarea]}
+            value={draft.systemPrompt}
+            multiline
+            numberOfLines={4}
+            onChangeText={v => setDraft({...draft, systemPrompt: v})}
+          />
+          <Text style={s.hint}>
+            Instruções base que definem o comportamento do assistant. Aplicadas ao
+            início de toda conversa.
+          </Text>
+        </Card>
+
+        {/* Card: Modo Thinking — persistência do toggle do item 7 */}
+        <Card title="Modo Thinking" icon="psychology">
+          <TouchableOpacity
+            style={s.toggleRow}
+            onPress={() =>
+              setDraft(d => ({...d, thinkingEnabled: !d.thinkingEnabled}))
+            }>
+            <Text style={s.toggleLabel}>
+              Ativar modo "pensar" por padrão
             </Text>
-          </>
-        ) : (
-          <>
-            <Text style={s.hint}>
-              Modelo GGUF no dispositivo (llama.rn). Download na tela principal.
-            </Text>
-            <Text style={s.label}>Caminho do modelo</Text>
-            <TextInput
-              style={s.input}
-              value={draft.llm.localModelPath ?? ''}
-              placeholder="/data/.../models/model.gguf"
-              placeholderTextColor="#aab2bc"
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={v => updateLlm({localModelPath: v})}
+            <Icon
+              name={draft.thinkingEnabled ? 'check-box' as const : 'check-box-outline-blank' as const}
+              size={24}
+              color={draft.thinkingEnabled ? '#3fb950' : '#8b949e'}
             />
-          </>
-        )}
+          </TouchableOpacity>
+          <Text style={s.hint}>
+            Quando ativo, o botão de thinking no chat começa ligado. Você ainda pode
+            alternar durante a conversa.
+          </Text>
+        </Card>
 
-        {/* Seção STT */}
-        <Text style={s.section}>STT (Whisper)</Text>
-        <Text style={s.hint}>
-          Caminho do modelo Whisper para transcrição de voz on-device. Deixe vazio
-          para desativar. Ex: ggml-tiny.bin (~75 MB).
-        </Text>
-        <TextInput
-          style={s.input}
-          value={draft.sttModelPath ?? ''}
-          placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
-          placeholderTextColor="#aab2bc"
-          autoCapitalize="none"
-          autoCorrect={false}
-          onChangeText={v => setDraft({...draft, sttModelPath: v})}
-        />
-
-        {/* System prompt */}
-        <Text style={s.section}>System Prompt</Text>
-        <TextInput
-          style={[s.input, s.textarea]}
-          value={draft.systemPrompt}
-          multiline
-          numberOfLines={4}
-          onChangeText={v => setDraft({...draft, systemPrompt: v})}
-        />
-
-        {/* Botao salvar */}
+        {/* Botão salvar */}
         <TouchableOpacity style={s.saveBtn} onPress={save}>
           <Icon name="check" size={20} color="#fff" />
           <Text style={s.saveBtnText}>Salvar</Text>
         </TouchableOpacity>
       </ScrollView>
 
-      {/* Modal com lista de modelos encontrados */}
+      {/* Modal de seleção de modelos */}
       <Modal visible={showModelsModal} transparent animationType="fade">
         <View style={s.modalOverlay}>
           <View style={s.modalCard}>
@@ -261,7 +307,9 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
                   style={s.modelItem}
                   onPress={() => pickModel(item)}>
                   <Icon name="memory" size={20} color="#58a6ff" />
-                  <Text style={s.modelItemText} numberOfLines={1}>{shortModelName(item)}</Text>
+                  <Text style={s.modelItemText} numberOfLines={1}>
+                    {shortModelName(item)}
+                  </Text>
                   {item === draft.llm.model && (
                     <Icon name="check" size={20} color="#3fb950" />
                   )}
@@ -304,16 +352,27 @@ const s = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
   },
-  container: {padding: 24, paddingBottom: 60},
-  section: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#8b949e',
-    marginTop: 24,
-    marginBottom: 12,
-    textTransform: 'uppercase',
+  container: {padding: 16, paddingBottom: 60, gap: 14},
+  /* Card — container que agrupa uma seção (item 6) */
+  card: {
+    backgroundColor: '#161b22',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#21262d',
+    padding: 16,
   },
-  row: {flexDirection: 'row', gap: 8},
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  cardTitle: {
+    color: '#e6edf3',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  row: {flexDirection: 'row', gap: 8, marginBottom: 4},
   tab: {
     flex: 1,
     flexDirection: 'row',
@@ -321,19 +380,21 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     gap: 6,
     paddingVertical: 14,
-    borderRadius: 12,
-    backgroundColor: '#161b22',
+    borderRadius: 10,
+    backgroundColor: '#0d1117',
   },
   tabActive: {backgroundColor: '#1f6feb'},
   tabText: {color: '#8b949e', fontWeight: '600', fontSize: 14},
   tabTextActive: {color: '#fff'},
-  label: {fontSize: 13, color: '#8b949e', marginBottom: 6, marginTop: 16},
+  label: {fontSize: 13, color: '#8b949e', marginBottom: 6, marginTop: 14},
   input: {
-    backgroundColor: '#161b22',
+    backgroundColor: '#0d1117',
     color: '#e6edf3',
     borderRadius: 10,
     padding: 14,
     fontSize: 15,
+    borderWidth: 1,
+    borderColor: '#21262d',
   },
   textarea: {minHeight: 96, textAlignVertical: 'top'},
   hint: {fontSize: 12, color: '#8b949e', marginTop: 6},
@@ -351,6 +412,13 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  toggleLabel: {color: '#e6edf3', fontSize: 15, flex: 1, paddingRight: 12},
   saveBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -359,7 +427,7 @@ const s = StyleSheet.create({
     backgroundColor: '#238636',
     paddingVertical: 14,
     borderRadius: 10,
-    marginTop: 32,
+    marginTop: 12,
   },
   saveBtnText: {color: '#fff', fontWeight: '700', fontSize: 16},
   /* Modal */

@@ -17,7 +17,7 @@
  *
  * @example
  *   shortModelName('/home/user/ollama/llama3.2:3b')      → 'llama3.2:3b'
- *   shortModelName('C:\\Users\\foo\\qwen2.5-7b.gguf')         → 'qwen2.5-7b.gguf'
+ *   shortModelName('C:\\Users\\foo\\qwen2.5-7b.gguf')      → 'qwen2.5-7b.gguf'
  *   shortModelName('qwen2.5')                              → 'qwen2.5'
  *   shortModelName('')                                     → ''
  */
@@ -29,4 +29,23 @@ export function shortModelName(id: string | undefined | null): string {
   const parts = trimmed.replace(/\\/g, '/').split('/').filter(Boolean);
   const last = parts[parts.length - 1];
   return last || trimmed;
+}
+
+/**
+ * Nome de exibição para o título da tela de chat — basename SANS extensões de
+ * modelo (.gguf, .gguf2, .bin). Útil quando o id vem com caminho completo do
+ * arquivo de modelo, que polui o header com "qwen2.5-7b.gguf" em vez de só
+ * "qwen2.5-7b".
+ *
+ * @example
+ *   displayModelName('/home/user/models/qwen2.5-7b.gguf')  → 'qwen2.5-7b'
+ *   displayModelName('llama3.2:3b')                         → 'llama3.2:3b'
+ *   displayModelName('ggml-tiny.bin')                       → 'ggml-tiny'
+ *   displayModelName('')                                    → ''
+ */
+export function displayModelName(id: string | undefined | null): string {
+  const base = shortModelName(id);
+  if (!base) return '';
+  // Remove extensões de modelo comuns (case-insensitive).
+  return base.replace(/\.(gguf|gguf2|bin)$/i, '');
 }
