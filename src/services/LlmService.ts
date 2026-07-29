@@ -154,8 +154,7 @@ function streamNetwork(
         // A ultima linha (sem nova-linha) fica para a proxima rodada ou para o final.
         lineBuffer += chunk;
         let nl: number;
-        while ((nl = lineBuffer.indexOf('
-')) !== -1) {
+        while ((nl = lineBuffer.indexOf('\n')) !== -1) {
           const line = lineBuffer.slice(0, nl).trimStart();
           lineBuffer = lineBuffer.slice(nl + 1);
           if (!line.startsWith('data:')) continue;
