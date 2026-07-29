@@ -408,11 +408,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             placeholder="Mensagem..."
             placeholderTextColor="#aab2bc"
             multiline
-            // lineHeight 20 → 1 linha ~ 24px, 5 linhas ~ 120px.
-            // minHeight 44 (1 linha), maxHeight 124 (5 linhas + padding).
-            // Acima disso o proprio TextInput ativa scroll interno (item 5).
-            minHeight={44}
-            maxHeight={124}
+            // minHeight/maxHeight via style (nao como props diretas —
+            // TextInputProps nao aceita). 1 linha (44px) ate 5 (124px);
+            // acima disso o proprio TextInput ativa scroll interno (item 5).
             maxLength={8000}
           />
         </View>
