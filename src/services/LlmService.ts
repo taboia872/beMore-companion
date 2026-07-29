@@ -148,15 +148,14 @@ function streamNetwork(
       if (full.length > consumed) {
         const chunk = full.slice(consumed);
         consumed = full.length;
-        // Anexa ao buffer e processa só linhas COMPLETAS (terminadas por 
-).
-        // Linhas SSE cortadas no meio entre chunks-resource precisam esperar
-        // o próximo onprogress p/ fechar — senão JSON.parse falha e perdemos
-        // o token. A última linha (sem 
-) fica p/ próxima rodada ou p/ final.
+        // Anexa ao buffer e processa só linhas COMPLETAS (terminadas por nova-linha).
+        // Linhas SSE cortadas no meio entre chunks precisam esperar o proximo
+        // onprogress para fechar — senao JSON.parse falha e perdemos o token.
+        // A ultima linha (sem nova-linha) fica para a proxima rodada ou para o final.
         lineBuffer += chunk;
         let nl: number;
-        while ((nl = lineBuffer.indexOf('\n')) !== -1) {
+        while ((nl = lineBuffer.indexOf('
+')) !== -1) {
           const line = lineBuffer.slice(0, nl).trimStart();
           lineBuffer = lineBuffer.slice(nl + 1);
           if (!line.startsWith('data:')) continue;
