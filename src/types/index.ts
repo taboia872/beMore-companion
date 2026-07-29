@@ -52,9 +52,10 @@ export interface AppSettings {
    */
   sttModelPath?: string;
   /**
-   * Habilita/desabilita o modo Thinking na UI. Quando true, o botão de toggle
-   * de thinking fica ativo no input do chat e a app instrui o modelo a usar
-   * a tag <thinking>. Controlado pelo usuário em runtime (item 7).
+   * Habilita/desabilita o streaming de respostas da IA. Quando true (padrão),
+   * tokens aparecem em tempo real conforme chegam (via SSE). Quando false, a
+   * resposta completa é aguardada em uma única requisição sem stream — útil
+   * em servidores que não suportam SSE ou quando o usuário prefere esperar.
    */
-  thinkingEnabled?: boolean;
+  streamingEnabled?: boolean;
 }

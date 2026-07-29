@@ -21,7 +21,7 @@ import {shortModelName} from '../utils/modelName';
 interface Props {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
-  onBack: () => void;
+  onClose: () => void;
 }
 
 interface RemoteModel {
@@ -47,7 +47,7 @@ function Card({title, icon, children}: CardProps) {
   );
 }
 
-export function SettingsScreen({settings, onChange, onBack}: Props) {
+export function SettingsScreen({settings, onChange, onClose}: Props) {
   const [draft, setDraft] = useState<AppSettings>(settings);
 
   const [fetchingModels, setFetchingModels] = useState(false);
@@ -109,15 +109,16 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
   };
 
   return (
-    <SafeAreaView style={s.safe}>
+    <View style={s.overlay}>
       <StatusBar
         backgroundColor="#0d1117"
         barStyle="light-content"
         translucent={false}
       />
+      <SafeAreaView style={s.safe}>
 
       <View style={s.header}>
-        <TouchableOpacity onPress={onBack} style={s.backBtn}>
+        <TouchableOpacity onPress={onClose} style={s.backBtn}>
           <Icon name="arrow-back" size={24} color="#e6edf3" />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Configurações</Text>
@@ -265,25 +266,26 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
           </Text>
         </Card>
 
-        {/* Card: Modo Thinking — persistência do toggle do item 7 */}
-        <Card title="Modo Thinking" icon="psychology">
+        {/* Card: Streaming — toggle persistente de respostas em tempo real */}
+        <Card title="Streaming de Respostas" icon="stream">
           <TouchableOpacity
             style={s.toggleRow}
             onPress={() =>
-              setDraft(d => ({...d, thinkingEnabled: !d.thinkingEnabled}))
+              setDraft(d => ({...d, streamingEnabled: d.streamingEnabled === false}))
             }>
             <Text style={s.toggleLabel}>
-              Ativar modo "pensar" por padrão
+              Receber respostas em tempo real
             </Text>
             <Icon
-              name={draft.thinkingEnabled ? 'check-box' as const : 'check-box-outline-blank' as const}
+              name={(draft.streamingEnabled !== false ? 'check-box' : 'check-box-outline-blank') as const}
               size={24}
-              color={draft.thinkingEnabled ? '#3fb950' : '#8b949e'}
+              color={draft.streamingEnabled !== false ? '#3fb950' : '#8b949e'}
             />
           </TouchableOpacity>
           <Text style={s.hint}>
-            Quando ativo, o botão de thinking no chat começa ligado. Você ainda pode
-            alternar durante a conversa.
+            Quando ativo, os tokens aparecem conforme chegam (SSE). Desative se
+            seu servidor não suporta streaming ou prefere aguardar a resposta
+            completa de uma vez.
           </Text>
         </Card>
 
@@ -326,10 +328,20 @@ export function SettingsScreen({settings, onChange, onBack}: Props) {
         </View>
       </Modal>
     </SafeAreaView>
+    </View>
   );
 }
 
 const s = StyleSheet.create({
+  // Overlay absolute fullscreen — cobre o ChatScreen por baixo (que continua
+  // montado, preservando o estado). Animação de entrada pode ser adicionada
+  // depois via Animated.
+  overlay: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: '#0d1117',
+    zIndex: 10,
+  },
   safe: {
     flex: 1,
     backgroundColor: '#0d1117',

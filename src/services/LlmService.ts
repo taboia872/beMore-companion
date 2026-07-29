@@ -47,23 +47,144 @@ function sanitizeContext(messages: Message[]): Array<{
  *
  * Sem polyfills adicionais: funciona com o XHR já embutido no RN (0.76+).
  *
- * @param messages  contexto (já sanitizado) a enviar
- * @param config    config LLM (baseUrl, apiKey, model)
- * @param onEvent   callback chamado a cada evento de stream
- * @returnsPromise que resolve ao final do stream (com `done`/`error`/`aborted` já emitidos)
+ * @param messages         contexto (já sanitizado) a enviar
+ * @param config           config LLM (baseUrl, apiKey, model)
+ * @param onEvent          callback chamado a cada evento de stream
+ * @param streamingEnabled se false, faz UMA requisicao sem `stream:true` e
+ *                         emite todo o conteudo como um unico `token` (modo
+ *                         batch). Default true. Util p/ servidores que nao
+ *                         suportam SSE ou quando o usuario prefere esperar.
+ * @returns Promise que resolve ao final (com done/error/aborted ja emitidos)
  */
 export function streamResponse(
   messages: Message[],
   config: LlmConfig,
   onEvent: StreamCallback,
+  streamingEnabled = true,
 ): Promise<void> {
   if (ctrl) abortGeneration();
   if (config.provider === 'localhost') {
-    return streamNetwork(messages, config, onEvent);
+    return streamingEnabled
+      ? streamNetwork(messages, config, onEvent)
+      : fetchBatch(messages, config, onEvent);
   }
   // Modo local (llama.rn) — não implementado ainda. Emite erro e termina.
   onEvent({type: 'error', message: 'Local model ainda não implementado'});
   return Promise.resolve();
+}
+
+/**
+ * Modo batch (sem stream). Faz UMA requisicao POST sem `stream:true`, aguarda
+ * a resposta completa, emite o conteudo como um unico token e finaliza.
+ * Reaproveita o mesmo parser de <thinking> do stream pra consistencia.
+ */
+function fetchBatch(
+  messages: Message[],
+  config: LlmConfig,
+  onEvent: StreamCallback,
+): Promise<void> {
+  return new Promise<void>(resolve => {
+    if (!config.baseUrl) {
+      onEvent({type: 'error', message: 'URL do servidor não configurada'});
+      resolve();
+      return;
+    }
+    // Parser de <thinking> reaproveitado (mesma logica do stream).
+    let inThinking = false;
+    let pending = '';
+    const routeDelta = (delta: string) => {
+      if (!delta) return;
+      pending += delta;
+      while (pending.length > 0) {
+        if (inThinking) {
+          const close = pending.indexOf('</thinking>');
+          if (close === -1) {
+            const tagLen = '</thinking>'.length - 1;
+            const safe = pending.length - tagLen;
+            if (safe > 0) {
+              onEvent({type: 'thinking', delta: pending.slice(0, safe)});
+              pending = pending.slice(safe);
+            }
+            return;
+          }
+          if (close > 0) onEvent({type: 'thinking', delta: pending.slice(0, close)});
+          pending = pending.slice(close + '</thinking>'.length);
+          inThinking = false;
+        } else {
+          const open = pending.indexOf('<thinking>');
+          if (open === -1) {
+            const tagLen = '<thinking>'.length - 1;
+            const safe = pending.length - tagLen;
+            if (safe > 0) {
+              onEvent({type: 'token', delta: pending.slice(0, safe)});
+              pending = pending.slice(safe);
+            }
+            return;
+          }
+          if (open > 0) onEvent({type: 'token', delta: pending.slice(0, open)});
+          pending = pending.slice(open + '<thinking>'.length);
+          inThinking = true;
+        }
+      }
+    };
+
+    let finished = false;
+    const finalize = (kind: 'done' | 'error' | 'aborted', msg?: string) => {
+      if (finished) return;
+      finished = true;
+      if (kind === 'done') onEvent({type: 'done'});
+      else if (kind === 'error')
+        onEvent({type: 'error', message: msg ?? 'Erro desconhecido'});
+      else onEvent({type: 'aborted'});
+      if (pending) {
+        if (inThinking) onEvent({type: 'thinking', delta: pending});
+        else onEvent({type: 'token', delta: pending});
+        pending = '';
+      }
+      if (ctrl === xhr) ctrl = null;
+      resolve();
+    };
+
+    const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.responseType = 'text';
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    if (config.apiKey) {
+      xhr.setRequestHeader('Authorization', `Bearer ${config.apiKey}`);
+    }
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === 4 && !finished) {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const json = JSON.parse(xhr.responseText);
+            const content: string = json?.choices?.[0]?.message?.content ?? '';
+            if (content) routeDelta(content);
+            finalize('done');
+          } catch (e) {
+            finalize('error', 'Resposta inválida do servidor');
+          }
+        } else {
+          const errText = xhr.responseText?.slice(0, 200) ?? '';
+          finalize('error', `API ${xhr.status}: ${errText}`);
+        }
+      }
+    };
+    xhr.onerror = () => {
+      if (!finished) finalize('error', 'Falha de rede ao conectar no servidor');
+    };
+    xhr.onabort = () => {
+      if (!finished) finalize('aborted');
+    };
+    ctrl = xhr;
+    xhr.send(
+      JSON.stringify({
+        model: config.model || 'local-model',
+        messages: sanitizeContext(messages),
+        stream: false,
+      }),
+    );
+  });
 }
 
 function streamNetwork(

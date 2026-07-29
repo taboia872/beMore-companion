@@ -1,23 +1,38 @@
 import React, {useState, useEffect, useCallback} from 'react';
-import {StatusBar, View} from 'react-native';
+import {StatusBar, View, BackHandler} from 'react-native';
 import {AppSettings, Message} from './types';
 import {loadSettings} from './data/appSettings';
 import {ChatScreen} from './screens/ChatScreen';
 import {SettingsScreen} from './screens/SettingsScreen';
 
-type Screen = 'chat' | 'settings';
-
 export default function App() {
-  const [screen, setScreen] = useState<Screen>('chat');
+  // 'settings' vira overlay — ChatScreen permanece MONTADO por baixo, então
+  // estado interno (streaming, thinkingMode, input, abortController) sobrevive
+  // a abrir/fechar settings. Antes era render condicional `? : ` que desmontava
+  // o Chat e destruia esse estado a cada troca de aba (bug do "botão de enviar
+  // resetando pra mic quando volto do settings").
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  // Estado das mensagens vive no App — sobrevive a trocas de aba e navegação.
-  // É o padrão React "lift state up": o componente que precisa persistir entre
-  // trocas de tela não pode viver dentro de um irmão desmontável.
   const [messages, setMessages] = useState<Message[]>([]);
 
   useEffect(() => {
     loadSettings().then(setSettings);
   }, []);
+
+  // Intercepta o botão "Voltar" físico do Android: se settings aberto, fecha
+  // o overlay; caso contrario deixa o sistema fazer (nada / sair). Sem isso,
+  // o Android finaliza a activity porque não há back-stack interno na app.
+  useEffect(() => {
+    const handler = () => {
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        return true; // consome o back
+      }
+      return false; // deixa o SO decidir
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', handler);
+    return () => sub.remove();
+  }, [settingsOpen]);
 
   const updateMessages = useCallback(
     (updater: (prev: Message[]) => Message[]) => {
@@ -37,18 +52,20 @@ export default function App() {
         barStyle="light-content"
         translucent={false}
       />
-      {screen === 'settings' ? (
+      {/* Chat SEMPRE montado — estado persiste entre overlay abas. */}
+      <ChatScreen
+        settings={settings}
+        messages={messages}
+        setMessages={updateMessages}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      {/* Settings renderizado como overlay absolute por cima do chat.
+          Quando fechado, renderiza null (não ocupa memória visual). */}
+      {settingsOpen && (
         <SettingsScreen
           settings={settings}
           onChange={setSettings}
-          onBack={() => setScreen('chat')}
-        />
-      ) : (
-        <ChatScreen
-          settings={settings}
-          messages={messages}
-          setMessages={updateMessages}
-          onOpenSettings={() => setScreen('settings')}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
     </View>

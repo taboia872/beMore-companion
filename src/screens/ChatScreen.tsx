@@ -20,6 +20,7 @@ import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
 import {displayModelName} from '../utils/modelName';
+import Markdown from '@ronradtke/react-native-markdown-display';
 
 // Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -36,11 +37,10 @@ interface Props {
 export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  // Modo thinking local ao chat — default vem de settings mas o usuário pode
-  // alternar em runtime sem gravar (item 7).
-  const [thinkingMode, setThinkingMode] = useState(
-    settings.thinkingEnabled ?? false,
-  );
+  // Modo thinking local ao chat — inicia DESLIGADO. Sem persistir em
+  // settings (foi removido do AppSettings); o usuário alterna em runtime
+  // pelo botão lâmpada dentro do input.
+  const [thinkingMode, setThinkingMode] = useState(false);
   // Ids de mensagens com bloco de thinking expandido.
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
 
@@ -108,7 +108,10 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         {role: 'system', content: sysContent},
         ...newMsgs.filter(m => m.id !== assistantId),
       ];
-      await streamResponse(context, settings.llm, event => {
+      await streamResponse(
+        context,
+        settings.llm,
+        event => {
         switch (event.type) {
           case 'thinking':
             updateAssistant(prev => ({
@@ -139,7 +142,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             }));
             break;
         }
-      });
+      },
+        settings.streamingEnabled !== false,
+      );
     } catch (e) {
       const errMsg = (e as Error).message ?? String(e);
       updateAssistant({
@@ -268,12 +273,11 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     const isUser = item.role === 'user';
     const isStreamingMsg =
       !isUser && (item.status === 'thinking' || item.status === 'streaming');
+    // Tag de status so aparece durante o "pensando". Assim que o modelo
+    // comeca a responder (status streaming), a tag some e so fica o texto
+    // sendo escrito — evita "Processando..." concorrendo com o proprio output.
     const statusLabel =
-      item.status === 'thinking'
-        ? 'Pensando...'
-        : item.status === 'streaming'
-          ? 'Processando...'
-          : null;
+      item.status === 'thinking' ? 'Pensando...' : null;
     const expanded = item.id ? expandedThinking.has(item.id) : false;
     const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
 
@@ -317,13 +321,13 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         )}
         {/* conteúdo principal */}
         {(item.content || !isStreamingMsg) && (
-          <Text
-            style={[
-              s.bubbleText,
-              isUser && s.bubbleTextUser,
-            ]}>
-            {item.content}
-          </Text>
+          isUser ? (
+            <Text style={[s.bubbleText, s.bubbleTextUser]}>
+              {item.content}
+            </Text>
+          ) : (
+            <Markdown style={mdStyle}>{item.content}</Markdown>
+          )
         )}
       </View>
     );
@@ -373,40 +377,93 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </View>
       )}
 
-      {/* Input bar (item 5 + 7 + 8) */}
+      {/* Input bar — botao de thinking DENTRO do campo (sem contorno). */}
       <View style={s.inputBar}>
-        {/* Toggle modo thinking (item 7) */}
-        <TouchableOpacity
-          style={[
-            s.thinkingBtn,
-            thinkingMode && s.thinkingBtnActive,
-          ]}
-          onPress={() => setThinkingMode(v => !v)}>
-          <Icon
-            name="psychology"
-            size={22}
-            color={thinkingMode ? '#58a6ff' : '#8b949e'}
-          />
-        </TouchableOpacity>
+        <View style={s.inputWrap}>
+          {/* Toggle thinking — icone lâmpada dentro do input, alinhado a esquerda.
+              Sem backgroundColor/border: so o icone, p/ nao poluir a UI. */}
+          <TouchableOpacity
+            style={s.thinkingBtn}
+            onPress={() => setThinkingMode(v => !v)}
+            hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+            <Icon
+              name={(thinkingMode ? 'lightbulb' : 'lightbulb-outline') as const}
+              size={22}
+              color={thinkingMode ? '#58a6ff' : '#8b949e'}
+            />
+          </TouchableOpacity>
 
-        <TextInput
-          style={s.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Mensagem..."
-          placeholderTextColor="#aab2bc"
-          multiline
-          numberOfLines={5}
-          // 5 linhas máx + scroll: limita o takeover da tela (item 5).
-          // textSize ~20px lineHeight → ~100px p/ 5 linhas; deixamos 120 de margem.
-          maxLength={8000}
-        />
+          <TextInput
+            style={s.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder="Mensagem..."
+            placeholderTextColor="#aab2bc"
+            multiline
+            // lineHeight 20 → 1 linha ~ 24px, 5 linhas ~ 120px.
+            // minHeight 44 (1 linha), maxHeight 124 (5 linhas + padding).
+            // Acima disso o proprio TextInput ativa scroll interno (item 5).
+            minHeight={44}
+            maxHeight={124}
+            maxLength={8000}
+          />
+        </View>
 
         {renderActionBtn()}
       </View>
     </SafeAreaView>
   );
 }
+
+// Estilos para o renderizador de Markdown (dark theme).
+// Sobrescreve apenas as cores — tipografia herda do tema da bubble.
+const mdStyle = StyleSheet.create({
+  body: {color: '#e6edf3', fontSize: 15, lineHeight: 21},
+  heading1: {color: '#e6edf3', fontSize: 22, fontWeight: '700', marginTop: 8, marginBottom: 6},
+  heading2: {color: '#e6edf3', fontSize: 19, fontWeight: '700', marginTop: 6, marginBottom: 4},
+  heading3: {color: '#e6edf3', fontSize: 17, fontWeight: '600', marginTop: 4, marginBottom: 3},
+  heading4: {color: '#e6edf3', fontSize: 16, fontWeight: '600'},
+  heading5: {color: '#e6edf3', fontSize: 15, fontWeight: '600'},
+  heading6: {color: '#8b949e', fontSize: 14, fontWeight: '600'},
+  code_inline: {
+    color: '#f0883e',
+    backgroundColor: '#0d1117',
+    paddingHorizontal: 4,
+    borderRadius: 3,
+    fontFamily: 'monospace',
+  },
+  code_block: {
+    color: '#e6edf3',
+    backgroundColor: '#0d1117',
+    padding: 10,
+    borderRadius: 6,
+    fontFamily: 'monospace',
+    fontSize: 13,
+  },
+  fence: {
+    color: '#e6edf3',
+    backgroundColor: '#0d1117',
+    padding: 10,
+    borderRadius: 6,
+    fontFamily: 'monospace',
+    fontSize: 13,
+  },
+  blockquote: {
+    backgroundColor: '#0d1117',
+    borderLeftWidth: 3,
+    borderLeftColor: '#58a6ff',
+    paddingLeft: 10,
+    paddingVertical: 4,
+    marginVertical: 4,
+  },
+  link: {color: '#58a6ff', textDecorationLine: 'underline'},
+  list_item: {color: '#e6edf3', marginVertical: 2},
+  bullet_list: {color: '#e6edf3'},
+  ordered_list: {color: '#e6edf3'},
+  em: {color: '#e6edf3', fontStyle: 'italic'},
+  strong: {color: '#fff', fontWeight: '700'},
+  text: {color: '#e6edf3'},
+});
 
 const s = StyleSheet.create({
   safe: {
@@ -519,27 +576,27 @@ const s = StyleSheet.create({
     backgroundColor: '#0d1117',
     gap: 8,
   },
-  thinkingBtn: {
-    width: 44,
-    height: 44,
+  inputWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
     borderRadius: 22,
-    backgroundColor: '#21262d',
+    backgroundColor: '#161b22',
+  },
+  thinkingBtn: {
+    // Dentro do input — sem contorno, so o icone. Posicionado a esquerda.
+    width: 40,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  thinkingBtnActive: {
-    backgroundColor: '#1a2a3d',
-    borderWidth: 1,
-    borderColor: '#58a6ff',
+    paddingLeft: 4,
   },
   input: {
     flex: 1,
     minHeight: 44,
-    maxHeight: 120, // ~5 linhas @ 20px lineHeight ~100px; 120 p/ margem scroll interno
-    paddingHorizontal: 12,
+    maxHeight: 124, // ~5 linhas; acima disso scroll interno (item 5)
+    paddingHorizontal: 8,
     paddingVertical: 10,
-    borderRadius: 22,
-    backgroundColor: '#161b22',
     color: '#e6edf3',
     fontSize: 15,
     textAlignVertical: 'top',

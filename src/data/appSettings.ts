@@ -12,7 +12,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     model: 'llama3',
   },
   sttModelPath: '',  // vazio: STT desabilitado até usuário apontar para modelo Whisper
-  thinkingEnabled: false,  // toggle do modo thinking no input do chat (item 7)
+  streamingEnabled: true,  // streaming de respostas SSE (pode desativar p/ servidores sem SSE)
 };
 
 export async function loadSettings(): Promise<AppSettings> {
