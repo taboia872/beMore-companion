@@ -15,6 +15,7 @@ import {
   UIManager,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
+import {Clipboard} from 'react-native';
 import {AppSettings, Message, MessageStatus} from '../types';
 import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
@@ -92,6 +93,36 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
     // Atualiza a mensagem do assistant in-place por id. Aceita patch direto
     // OU updater funcional (precisa do estado anterior p/ concatenar tokens).
+    // Token batching: acumula deltas e flush a cada 50ms para reduzir
+    // re-renders do FlatList durante streaming (performance em RN).
+    const pendingTokens = useRef<{content: string; thinking: string}>(
+      {content: '', thinking: ''},
+    );
+    const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const flushPendingTokens = () => {
+      const {content: c, thinking: t} = pendingTokens.current;
+      if (!c && !t) return;
+      pendingTokens.current = {content: '', thinking: ''};
+      setMessages(prev =>
+        prev.map(m => {
+          if (m.id !== assistantId) return m;
+          return {
+            ...m,
+            content: m.content + c,
+            thinking: (m.thinking ?? '') + t,
+          };
+        }),
+      );
+    };
+
+    const batchToken = (field: 'content' | 'thinking', delta: string) => {
+      if (!delta) return;
+      pendingTokens.current[field] += delta;
+      if (flushTimer.current) clearTimeout(flushTimer.current);
+      flushTimer.current = setTimeout(flushPendingTokens, 50);
+    };
+
     const updateAssistant = (
       patchOrUpdater: Partial<Message> | ((prev: Message) => Partial<Message>),
     ) => {
@@ -117,19 +148,18 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         settings.llm,
         event => {
         switch (event.type) {
+          case 'reasoning':
           case 'thinking':
-            updateAssistant(prev => ({
-              thinking: (prev.thinking ?? '') + event.delta,
-              status: 'thinking',
-            }));
+            batchToken('thinking', event.delta);
+            updateAssistant({status: 'thinking'});
             break;
           case 'token':
-            updateAssistant(prev => ({
-              content: prev.content + event.delta,
-              status: 'streaming',
-            }));
+            batchToken('content', event.delta);
+            updateAssistant({status: 'streaming'});
             break;
           case 'done':
+            flushPendingTokens();
+            if (flushTimer.current) clearTimeout(flushTimer.current);
             updateAssistant({status: 'done'});
             break;
           case 'error':
@@ -157,6 +187,8 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         content: `⚠ ${errMsg}`,
       });
     } finally {
+      flushPendingTokens();
+      if (flushTimer.current) clearTimeout(flushTimer.current);
       setStreaming(false);
       assistantIdRef.current = null;
     }
@@ -273,6 +305,36 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     });
   };
 
+  const copyMessage = (text: string) => {
+    if (text.trim()) Clipboard.setString(text);
+  };
+
+  const regenerateMessage = (msg: Message) => {
+    const idx = messages.findIndex(m => m.id === msg.id);
+    if (idx <= 0) return;
+    const prevUser = messages
+      .slice(0, idx)
+      .reverse()
+      .find(m => m.role === 'user');
+    if (prevUser) send(prevUser.content);
+  };
+
+  const deleteMessage = (msg: Message) => {
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === msg.id);
+      if (idx < 0) return prev;
+      // Se assistant, remove tambem a pergunta do user imediatamente antes.
+      if (msg.role === 'assistant' && idx > 0 && prev[idx - 1].role === 'user') {
+        return prev.filter((_, i) => i !== idx && i !== idx - 1);
+      }
+      // Se user, remove a msg e a resposta do assistant depois dela.
+      if (msg.role === 'user' && idx < prev.length - 1 && prev[idx + 1].role === 'assistant') {
+        return prev.filter((_, i) => i !== idx && i !== idx + 1);
+      }
+      return prev.filter(m => m.id !== msg.id);
+    });
+  };
+
   // Nome do ícone de thinking conforme estado do toggle (lâmpada acesa/apagada).
   // as const em cada return para satisfazer a tipagem estrita do prop name
   // do <Icon> (v13 scoped exige union MaterialIconsIconName).
@@ -340,6 +402,31 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           ) : (
             <Markdown style={mdStyle}>{item.content}</Markdown>
           )
+        )}
+        {/* Action bar estilo llama-ui: icones apos a mensagem. */}
+        {!isStreamingMsg && !item.isError && (
+          <View style={s.actionBar}>
+            <TouchableOpacity
+              style={s.actionBarItem}
+              onPress={() => copyMessage(item.content)}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="content-copy" size={15} color="#8b949e" />
+            </TouchableOpacity>
+            {!isUser && (
+              <TouchableOpacity
+                style={s.actionBarItem}
+                onPress={() => regenerateMessage(item)}
+                hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                <Icon name="refresh" size={15} color="#8b949e" />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={s.actionBarItem}
+              onPress={() => deleteMessage(item)}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="delete-outline" size={15} color="#8b949e" />
+            </TouchableOpacity>
+          </View>
         )}
       </View>
     );
@@ -562,6 +649,19 @@ const s = StyleSheet.create({
     marginBottom: 8,
     borderWidth: 1,
     borderColor: '#21262d',
+  },
+  actionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    marginTop: 6,
+    paddingTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+    opacity: 0.7,
+  },
+  actionBarItem: {
+    padding: 4,
   },
   thinkingText: {
     color: '#8b949e',

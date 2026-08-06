@@ -3,13 +3,23 @@ import {LlmConfig, Message} from '../types';
 /**
  * Eventos de stream emitidos para a UI conforme os tokens chegam.
  *
- * - 'thinking' : pedaço de raciocínio (entre <thinking></thinking> ou AutoresizingMask)
- * - 'token'     : pedaço de conteúdo visível (texto da resposta)
- * - 'done'      : stream terminou normalmente
- * - 'error'     : erro — carrega `message`
- * - 'aborted'   : geração cancelada pelo usuário (botão parar)
+ * - 'reasoning': pedaço de raciocínio vindo do campo `reasoning_content`
+ *      do delta SSE (servidores modernos: DeepSeek API, OpenRouter, etc).
+ * - 'thinking' : pedaço de raciocínio extraído de tags inline (<thinking>,
+ *      ) no `content` — modelos locais via Ollama que nao separam
+ *      o raciocnio num campo proprio.
+ * - 'token'     : pedaço de conteúdo visível (texto da resposta).
+ * - 'done'      : stream terminou normalmente.
+ * - 'error'     : erro — carrega `message`.
+ * - 'aborted'   : geração cancelada pelo usuário (botão parar).
+ *
+ * 'reasoning' e 'thinking' sao distintos na fonte mas a UI os trata
+ * igual: ambos alimentam `message.thinking`. Manter os tipos separados
+ * permite futuras diferenciacoes (ex: reasoning_content tem timestamp,
+ * tags inline nao).
  */
 export type StreamEvent =
+  | {type: 'reasoning'; delta: string}
   | {type: 'thinking'; delta: string}
   | {type: 'token'; delta: string}
   | {type: 'done'}
@@ -53,11 +63,18 @@ function sanitizeContext(messages: Message[]): Array<{
 // `flushPending` (esmagar buffer remanescente no fim) e estado `inThinking`.
 export function createThinkingParser(onEvent: StreamCallback) {
   // Pares de tags suportados, ordenados para que prefixes mais longos
-  // sejam testados primeiro (evita mismatches parciais). 'use model'
-  // entrega <think> mas também <thinking> em alguns prompts.
+  // sejam testados primeiro (evita mismatches parciais). Modelos locais
+  // (Ollama, llama.cpp) emitem tags inline no `content`:
+  //   1.  ( DeepSeek-R1 / Qwen3 / O1-style)
+  //   2. <thinking>...</thinking>  (genérico, alguns modelos open)
+  // O par canônico  é o mesmo usado pelo open-webui (middleware.py).
   const TAG_PAIRS: Array<[open: string, close: string]> = [
     ['<thinking>', '</thinking>'],
-    ['<think>', ''],
+    ['<reasoning>', '</reasoning>'],
+    ['<reason>', '</reason>'],
+    ['<thought>', '</thought>'],
+    ['<Thought>', '</Thought>'],
+    ['🧠', '💬'],
   ];
 
   // Para detectar tags que chegam parcialmente, guardamos até
@@ -229,7 +246,15 @@ function fetchBatch(
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const json = JSON.parse(xhr.responseText);
-            const content: string = json?.choices?.[0]?.message?.content ?? '';
+            const choice = json?.choices?.[0];
+            // reasoning_content em modo batch (non-stream).
+            const reasoning: string =
+              choice?.message?.reasoning_content ??
+              choice?.message?.reasoning ??
+              choice?.message?.thinking ??
+              '';
+            if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
+            const content: string = choice?.message?.content ?? '';
             if (content) parser.routeDelta(content);
             finalize('done');
           } catch (e) {
@@ -318,7 +343,18 @@ function streamNetwork(
           }
           try {
             const json = JSON.parse(data);
-            const delta: string = json?.choices?.[0]?.delta?.content ?? '';
+            const choice = json?.choices?.[0];
+            if (!choice) continue;
+            // Servers modernos (DeepSeek API, OpenRouter) enviam reasoning
+            // num campo separado do content. Modelos locais (Ollama)usam
+            // tags inline no content — o parser abaixo cuida disso.
+            const reasoning: string =
+              choice?.delta?.reasoning_content ??
+              choice?.delta?.reasoning ??
+              choice?.delta?.thinking ??
+              '';
+            if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
+            const delta: string = choice?.delta?.content ?? '';
             if (delta) parser.routeDelta(delta);
           } catch {
             // linha parcial / keep-alive — ignora.
@@ -338,7 +374,18 @@ function streamNetwork(
           }
           try {
             const json = JSON.parse(data);
-            const delta: string = json?.choices?.[0]?.delta?.content ?? '';
+            const choice = json?.choices?.[0];
+            if (!choice) continue;
+            // Servers modernos (DeepSeek API, OpenRouter) enviam reasoning
+            // num campo separado do content. Modelos locais (Ollama)usam
+            // tags inline no content — o parser abaixo cuida disso.
+            const reasoning: string =
+              choice?.delta?.reasoning_content ??
+              choice?.delta?.reasoning ??
+              choice?.delta?.thinking ??
+              '';
+            if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
+            const delta: string = choice?.delta?.content ?? '';
             if (delta) parser.routeDelta(delta);
           } catch {
             /* descarta */
