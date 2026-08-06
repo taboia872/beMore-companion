@@ -281,7 +281,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           <TouchableOpacity
             style={s.toggleRow}
             onPress={() =>
-              setDraft(d => ({...d, streamingEnabled: d.streamingEnabled === false}))
+              setDraft(d => ({...d, streamingEnabled: d.streamingEnabled !== false}))
             }>
             <Text style={s.toggleLabel}>
               Receber respostas em tempo real

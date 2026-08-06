@@ -62,8 +62,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
     // Injeta instrução de thinking no system prompt dinamicamente quando ativo.
     // Não persiste em settings — só para essa rodada (item 4 + 7).
+    // Usamos <think>... ( DeepSeek-R1 / Qwen3 / O1-style) em vez de
+    // <thinking> porque é o que a maioria dos modelos que suportam reasoning
+    // nativamente emite. Para modelos que não suportam, a instrução explícita
+    // pede <thinking> como fallback — o parser do LlmService reconhece ambas.
     const sysContent = thinkingMode
-      ? `${settings.systemPrompt}\n\nAntes de responder, pense passo a passo dentro de uma tag <thinking>...</thinking> e depois escreva a resposta final fora da tag.`
+      ? `${settings.systemPrompt}\n\nBefore answering, reason step by step inside <think>... tags, then write your final answer outside the tags. If you cannot produce think tags, wrap your reasoning in <thinking>...</thinking> instead.`
       : settings.systemPrompt;
 
     const userMsg: Message = {

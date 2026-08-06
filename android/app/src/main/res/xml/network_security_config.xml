@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network Security Config para o Be More Companion.
+
+  Estratégia: cleartext PERMITIDO por padrão (necessário porque o
+  app se conecta a servidores na LAN — Ollama, LM Studio, llama.cpp —
+  cujo IP é definido pelo usuário em Settings e pode ser qualquer
+  192.168.x.x, 10.x.x.x, etc.). O Android NSC não suporta ranges CIDR;
+  listar cada IP é impraticável.
+
+  Em vez disso, FORÇAMOS HTTPS (cleartext negado) para domínios externos
+  conhecidos de APIs de IA — onde a chave API trafega e TLS é obrigatório.
+  Todo o resto (IPs da LAN, localhost) fica liberado para cleartext.
+
+  Domínios externos que tentarem HTTP serão bloqueados; domínios externos
+  via HTTPS funcionam normalmente sem precisar de exceção (a regra default
+  do Android já permite HTTPS para qualquer destino).
+-->
+<network-security-config>
+    <!--
+      Domínios externos onde cleartext (HTTP) é PROIBIDO.
+      Força HTTPS para provedores de IA onde a API key trafega.
+      Estes domínios só funcionam via HTTPS — se o usuário apontar
+      para http://api.openai.com, a conexão é recusada.
+    -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">openai.com</domain>
+        <domain includeSubdomains="true">openrouter.ai</domain>
+        <domain includeSubdomains="true">groq.com</domain>
+        <domain includeSubdomains="true">anthropic.com</domain>
+        <domain includeSubdomains="true">x.ai</domain>
+        <domain includeSubdomains="true">together.xyz</domain>
+        <domain includeSubdomains="true">fireworks.ai</domain>
+        <domain includeSubdomains="true">mistral.ai</domain>
+        <domain includeSubdomains="true">deepseek.com</domain>
+        <domain includeSubdomains="true">googleapis.com</domain>
+        <domain includeSubdomains="true">aihorde.net</domain>
+    </domain-config>
+
+    <!--
+      Debug-only: confia em certs do usuário em builds debug.
+      Em release, apenas CA do sistema.
+    -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user"/>
+            <certificates src="system"/>
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

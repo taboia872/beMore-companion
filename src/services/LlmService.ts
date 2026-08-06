@@ -3,7 +3,7 @@ import {LlmConfig, Message} from '../types';
 /**
  * Eventos de stream emitidos para a UI conforme os tokens chegam.
  *
- * - 'thinking' : pedaço de raciocínio (entre <thinking></thinking>)
+ * - 'thinking' : pedaço de raciocínio (entre <thinking></thinking> ou AutoresizingMask)
  * - 'token'     : pedaço de conteúdo visível (texto da resposta)
  * - 'done'      : stream terminou normalmente
  * - 'error'     : erro — carrega `message`
@@ -35,6 +35,113 @@ function sanitizeContext(messages: Message[]): Array<{
   return messages
     .filter(m => !m.isError && m.content.trim() !== '')
     .map(m => ({role: m.role, content: m.content}));
+}
+
+// ---------------------------------------------------------------------------
+// Parser de tags de reasoning (thinking) — reutilizado por stream e batch.
+// ---------------------------------------------------------------------------
+//
+// Modelos que suportam reasoning usam duas convenções de tags:
+//   1. <thinking>...</thinking>  — genérico, usado por alguns modelos open
+//   2.  MacBook / DeepSeek-R1 / Qwen3 / O1-style
+//
+// Este parser reconhece AMBAS. As tags podem chegar fatiadas entre chunks,
+// então mantemos um buffer de bytes suspeitos (fim de chunk que pode ser
+// prefixo de uma tag de abertura/fechamento).
+//
+// A função retorna um objeto com `routeDelta` (alimentar novo texto),
+// `flushPending` (esmagar buffer remanescente no fim) e estado `inThinking`.
+export function createThinkingParser(onEvent: StreamCallback) {
+  // Pares de tags suportados, ordenados para que prefixes mais longos
+  // sejam testados primeiro (evita mismatches parciais). 'use model'
+  // entrega <think> mas também <thinking> em alguns prompts.
+  const TAG_PAIRS: Array<[open: string, close: string]> = [
+    ['<thinking>', '</thinking>'],
+    ['<think>', ''],
+  ];
+
+  // Para detectar tags que chegam parcialmente, guardamos até
+  // maxOpenTagLen-1 bytes no buffer se eles parecem prefixo de tag.
+  const maxOpenTagLen = Math.max(...TAG_PAIRS.map(([o]) => o.length));
+  const maxCloseTagLen = Math.max(...TAG_PAIRS.map(([, c]) => c.length));
+
+  let inThinking = false;
+  let pending = '';
+
+  function routeDelta(delta: string) {
+    if (!delta) return;
+    pending += delta;
+    while (pending.length > 0) {
+      if (inThinking) {
+        // Procura a tag de fechamento mais próxima.
+        let closeIdx = -1;
+        let closeLen = 0;
+        for (const [, close] of TAG_PAIRS) {
+          const idx = pending.indexOf(close);
+          if (idx !== -1 && (closeIdx === -1 || idx < closeIdx)) {
+            closeIdx = idx;
+            closeLen = close.length;
+          }
+        }
+        if (closeIdx === -1) {
+          // Retém até maxCloseTagLen-1 bytes (podem ser prefixo da tag).
+          const safe = pending.length - (maxCloseTagLen - 1);
+          if (safe > 0) {
+            onEvent({type: 'thinking', delta: pending.slice(0, safe)});
+            pending = pending.slice(safe);
+          }
+          return;
+        }
+        if (closeIdx > 0) {
+          onEvent({type: 'thinking', delta: pending.slice(0, closeIdx)});
+        }
+        pending = pending.slice(closeIdx + closeLen);
+        inThinking = false;
+      } else {
+        // Procura a tag de abertura mais próxima.
+        let openIdx = -1;
+        let openLen = 0;
+        for (const [open] of TAG_PAIRS) {
+          const idx = pending.indexOf(open);
+          if (idx !== -1 && (openIdx === -1 || idx < openIdx)) {
+            openIdx = idx;
+            openLen = open.length;
+          }
+        }
+        if (openIdx === -1) {
+          // Retém até maxOpenTagLen-1 bytes (podem ser prefixo da tag).
+          const safe = pending.length - (maxOpenTagLen - 1);
+          if (safe > 0) {
+            onEvent({type: 'token', delta: pending.slice(0, safe)});
+            pending = pending.slice(safe);
+          }
+          return;
+        }
+        if (openIdx > 0) {
+          onEvent({type: 'token', delta: pending.slice(0, openIdx)});
+        }
+        pending = pending.slice(openIdx + openLen);
+        inThinking = true;
+      }
+    }
+  }
+
+  /** Esmaga o buffer pendente, emitindo o restante como thinking ou token. */
+  function flushPending() {
+    if (pending) {
+      if (inThinking) onEvent({type: 'thinking', delta: pending});
+      else onEvent({type: 'token', delta: pending});
+      pending = '';
+    }
+  }
+
+  return {
+    routeDelta,
+    flushPending,
+    get inThinking() {
+      return inThinking;
+    },
+  };
 }
 
 /**
@@ -89,58 +196,22 @@ function fetchBatch(
       resolve();
       return;
     }
-    // Parser de <thinking> reaproveitado (mesma logica do stream).
-    let inThinking = false;
-    let pending = '';
-    const routeDelta = (delta: string) => {
-      if (!delta) return;
-      pending += delta;
-      while (pending.length > 0) {
-        if (inThinking) {
-          const close = pending.indexOf('</thinking>');
-          if (close === -1) {
-            const tagLen = '</thinking>'.length - 1;
-            const safe = pending.length - tagLen;
-            if (safe > 0) {
-              onEvent({type: 'thinking', delta: pending.slice(0, safe)});
-              pending = pending.slice(safe);
-            }
-            return;
-          }
-          if (close > 0) onEvent({type: 'thinking', delta: pending.slice(0, close)});
-          pending = pending.slice(close + '</thinking>'.length);
-          inThinking = false;
-        } else {
-          const open = pending.indexOf('<thinking>');
-          if (open === -1) {
-            const tagLen = '<thinking>'.length - 1;
-            const safe = pending.length - tagLen;
-            if (safe > 0) {
-              onEvent({type: 'token', delta: pending.slice(0, safe)});
-              pending = pending.slice(safe);
-            }
-            return;
-          }
-          if (open > 0) onEvent({type: 'token', delta: pending.slice(0, open)});
-          pending = pending.slice(open + '<thinking>'.length);
-          inThinking = true;
-        }
-      }
-    };
+    // Parser de thinking reaproveitado (reconhece <thinking> e  tags).
+    const parser = createThinkingParser(onEvent);
 
     let finished = false;
     const finalize = (kind: 'done' | 'error' | 'aborted', msg?: string) => {
       if (finished) return;
       finished = true;
+      // Esmaga buffer de tags thinking pendente ANTES de emitir done/error/aborted.
+      // Se emitirmos 'done' primeiro, a UI marca status='done' e tokens
+      // que chegarem depois podem ser ignorados pelo render (condição
+      // isStreamingMsg fica falsa).
+      parser.flushPending();
       if (kind === 'done') onEvent({type: 'done'});
       else if (kind === 'error')
         onEvent({type: 'error', message: msg ?? 'Erro desconhecido'});
       else onEvent({type: 'aborted'});
-      if (pending) {
-        if (inThinking) onEvent({type: 'thinking', delta: pending});
-        else onEvent({type: 'token', delta: pending});
-        pending = '';
-      }
       if (ctrl === xhr) ctrl = null;
       resolve();
     };
@@ -159,7 +230,7 @@ function fetchBatch(
           try {
             const json = JSON.parse(xhr.responseText);
             const content: string = json?.choices?.[0]?.message?.content ?? '';
-            if (content) routeDelta(content);
+            if (content) parser.routeDelta(content);
             finalize('done');
           } catch (e) {
             finalize('error', 'Resposta inválida do servidor');
@@ -206,52 +277,10 @@ function streamNetwork(
       stream: true,
     });
 
-    // Parser de <thinking>: estado p/ rotear delta p/ thinking vs content.
-    // As tags podem chegar fatiadas entre chunks, então mantemos um buffer de
-    // bytes suspeitos (fim de chunk que pode ser prefixo de <thinking>).
-    let inThinking = false;
-    let pending = '';
-
-    const routeDelta = (delta: string) => {
-      if (!delta) return;
-      pending += delta;
-      while (pending.length > 0) {
-        if (inThinking) {
-          const close = pending.indexOf('</thinking>');
-          if (close === -1) {
-            // Reta o que certamente NÃO é parte da tag de fechamento.
-            const tagLen = '</thinking>'.length - 1;
-            const safe = pending.length - tagLen;
-            if (safe > 0) {
-              onEvent({type: 'thinking', delta: pending.slice(0, safe)});
-              pending = pending.slice(safe);
-            }
-            return;
-          }
-          if (close > 0) {
-            onEvent({type: 'thinking', delta: pending.slice(0, close)});
-          }
-          pending = pending.slice(close + '</thinking>'.length);
-          inThinking = false;
-        } else {
-          const open = pending.indexOf('<thinking>');
-          if (open === -1) {
-            const tagLen = '<thinking>'.length - 1;
-            const safe = pending.length - tagLen;
-            if (safe > 0) {
-              onEvent({type: 'token', delta: pending.slice(0, safe)});
-              pending = pending.slice(safe);
-            }
-            return;
-          }
-          if (open > 0) {
-            onEvent({type: 'token', delta: pending.slice(0, open)});
-          }
-          pending = pending.slice(open + '<thinking>'.length);
-          inThinking = true;
-        }
-      }
-    };
+    // Parser de thinking: reconhece <thinking> e  tags.
+    // As tags podem chegar fatiadas entre chunks — o parser mantém um buffer
+    // interno de bytes suspeitos e expõe routeDelta + flushPending.
+    const parser = createThinkingParser(onEvent);
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
@@ -281,13 +310,16 @@ function streamNetwork(
           if (!line.startsWith('data:')) continue;
           const data = line.slice(5).trim();
           if (data === '[DONE]') {
+            // Esmaga buffer de tags thinking pendente ANTES de finalizar.
+            // Sem isso, a última retenção (até tagLen-1 bytes) é perdida.
+            parser.flushPending();
             finalize('done');
             return;
           }
           try {
             const json = JSON.parse(data);
             const delta: string = json?.choices?.[0]?.delta?.content ?? '';
-            if (delta) routeDelta(delta);
+            if (delta) parser.routeDelta(delta);
           } catch {
             // linha parcial / keep-alive — ignora.
           }
@@ -300,23 +332,20 @@ function streamNetwork(
         if (line.startsWith('data:')) {
           const data = line.slice(5).trim();
           if (data === '[DONE]') {
+            parser.flushPending();
             finalize('done');
             return;
           }
           try {
             const json = JSON.parse(data);
             const delta: string = json?.choices?.[0]?.delta?.content ?? '';
-            if (delta) routeDelta(delta);
+            if (delta) parser.routeDelta(delta);
           } catch {
             /* descarta */
           }
         }
         // Esmaga buffer de tags thinking pendente.
-        if (pending) {
-          if (inThinking) onEvent({type: 'thinking', delta: pending});
-          else onEvent({type: 'token', delta: pending});
-          pending = '';
-        }
+        parser.flushPending();
         finalize('done');
       }
     };
@@ -325,6 +354,8 @@ function streamNetwork(
     const finalize = (kind: 'done' | 'error' | 'aborted', msg?: string) => {
       if (finished) return;
       finished = true;
+      // Esmaga buffer pendente antes de emitir o evento final.
+      parser.flushPending();
       if (kind === 'done') onEvent({type: 'done'});
       else if (kind === 'error')
         onEvent({type: 'error', message: msg ?? 'Erro desconhecido'});
