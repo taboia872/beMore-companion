@@ -344,18 +344,16 @@ function streamNetwork(
           try {
             const json = JSON.parse(data);
             const choice = json?.choices?.[0];
-            if (!choice) continue;
-            // Servers modernos (DeepSeek API, OpenRouter) enviam reasoning
-            // num campo separado do content. Modelos locais (Ollama)usam
-            // tags inline no content — o parser abaixo cuida disso.
-            const reasoning: string =
-              choice?.delta?.reasoning_content ??
-              choice?.delta?.reasoning ??
-              choice?.delta?.thinking ??
-              '';
-            if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
-            const delta: string = choice?.delta?.content ?? '';
-            if (delta) parser.routeDelta(delta);
+            if (choice) {
+              const reasoning: string =
+                choice?.delta?.reasoning_content ??
+                choice?.delta?.reasoning ??
+                choice?.delta?.thinking ??
+                '';
+              if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
+              const delta: string = choice?.delta?.content ?? '';
+              if (delta) parser.routeDelta(delta);
+            }
           } catch {
             // linha parcial / keep-alive — ignora.
           }
@@ -375,18 +373,16 @@ function streamNetwork(
           try {
             const json = JSON.parse(data);
             const choice = json?.choices?.[0];
-            if (!choice) continue;
-            // Servers modernos (DeepSeek API, OpenRouter) enviam reasoning
-            // num campo separado do content. Modelos locais (Ollama)usam
-            // tags inline no content — o parser abaixo cuida disso.
-            const reasoning: string =
-              choice?.delta?.reasoning_content ??
-              choice?.delta?.reasoning ??
-              choice?.delta?.thinking ??
-              '';
-            if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
-            const delta: string = choice?.delta?.content ?? '';
-            if (delta) parser.routeDelta(delta);
+            if (choice) {
+              const reasoning: string =
+                choice?.delta?.reasoning_content ??
+                choice?.delta?.reasoning ??
+                choice?.delta?.thinking ??
+                '';
+              if (reasoning) onEvent({type: 'reasoning', delta: reasoning});
+              const delta: string = choice?.delta?.content ?? '';
+              if (delta) parser.routeDelta(delta);
+            }
           } catch {
             /* descarta */
           }

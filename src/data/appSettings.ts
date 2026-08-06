@@ -57,7 +57,7 @@ async function saveApiKey(apiKey: string): Promise<void> {
     } else {
       // Limpa a credencial quando apiKey é vazia.
       try {
-        await Keychain.resetInternetCredentials(APIKEY_KEYCHAIN_SERVER);
+        await Keychain.resetInternetCredentials({server: APIKEY_KEYCHAIN_SERVER});
       } catch {
         /* no-op — pode não existir */
       }
