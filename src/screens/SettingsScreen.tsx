@@ -281,15 +281,15 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           <TouchableOpacity
             style={s.toggleRow}
             onPress={() =>
-              setDraft(d => ({...d, streamingEnabled: d.streamingEnabled !== false}))
+              setDraft(d => ({...d, streamingEnabled: !d.streamingEnabled}))
             }>
             <Text style={s.toggleLabel}>
               Receber respostas em tempo real
             </Text>
             <Icon
-              name={streamingCheckboxIcon(draft.streamingEnabled !== false)}
+              name={streamingCheckboxIcon(draft.streamingEnabled === true)}
               size={24}
-              color={draft.streamingEnabled !== false ? '#3fb950' : '#8b949e'}
+              color={draft.streamingEnabled === true ? '#3fb950' : '#8b949e'}
             />
           </TouchableOpacity>
           <Text style={s.hint}>

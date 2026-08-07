@@ -186,7 +186,6 @@ export function streamResponse(
   onEvent: StreamCallback,
   streamingEnabled = true,
 ): Promise<void> {
-  if (ctrl) abortGeneration();
   if (config.provider === 'localhost') {
     return streamingEnabled
       ? streamNetwork(messages, config, onEvent)
@@ -443,9 +442,11 @@ let ctrl: XMLHttpRequest | null = null;
  * No-op se não houver geração ativa.
  */
 export function abortGeneration(): void {
-  if (ctrl) {
+  const xhr = ctrl;
+  if (xhr) {
+    ctrl = null;  // limpa ANTES do abort p/ evitar race com onabort async
     try {
-      ctrl.abort();
+      xhr.abort();
     } catch {
       /* no-op */
     }

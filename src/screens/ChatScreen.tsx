@@ -28,6 +28,31 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
+// Indicador de "typing" — três pontos que pulam em sequência (feedback
+// visual de que o modelo está processando). Animação em loop infinito.
+function TypingDots() {
+  const [active, setActive] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActive(a => (a + 1) % 3);
+    }, 400);
+    return () => clearInterval(interval);
+  }, []);
+  return (
+    <View style={s.typingDots}>
+      {[0, 1, 2].map(i => (
+        <View
+          key={i}
+          style={[
+            s.typingDot,
+            active === i && s.typingDotActive,
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
 interface Props {
   settings: AppSettings;
   messages: Message[];
@@ -351,7 +376,11 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // comeca a responder (status streaming), a tag some e so fica o texto
     // sendo escrito — evita "Processando..." concorrendo com o proprio output.
     const statusLabel =
-      item.status === 'thinking' ? 'Pensando...' : null;
+      item.status === 'thinking'
+        ? 'Pensando...'
+        : item.status === 'streaming'
+          ? null  // token-a-token não precisa de label — o texto aparecendo já é o feedback
+          : null;
     const expanded = item.id ? expandedThinking.has(item.id) : false;
     const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
 
@@ -365,11 +394,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
               ? s.bubbleError
               : s.bubbleBot,
         ]}>
-        {/* status de geração (item 3) */}
+        {/* status de geração — feedback de "pensando" */}
         {statusLabel && (
           <View style={s.statusRow}>
             <ActivityIndicator size="small" color="#58a6ff" />
             <Text style={s.statusText}>{statusLabel}</Text>
+            <TypingDots />
           </View>
         )}
         {/* bloco pensamento expansível (item 4) */}
@@ -641,6 +671,20 @@ const s = StyleSheet.create({
     color: '#8b949e',
     fontSize: 12,
     fontStyle: 'italic',
+  },
+  typingDots: {
+    flexDirection: 'row',
+    gap: 3,
+    marginLeft: 2,
+  },
+  typingDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#30363d',
+  },
+  typingDotActive: {
+    backgroundColor: '#58a6ff',
   },
   thinkingBox: {
     backgroundColor: '#0d1117',
