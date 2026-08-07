@@ -13,6 +13,7 @@ import {
   LayoutAnimation,
   Platform,
   UIManager,
+  KeyboardAvoidingView,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
@@ -77,7 +78,11 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   const whisper = useWhisper();
 
   useEffect(() => {
-    listRef.current?.scrollToEnd({animated: true});
+    // Pequeno delay p/ garantir que o layout foi atualizado antes do scroll.
+    const timer = setTimeout(() => {
+      listRef.current?.scrollToEnd({animated: false});
+    }, 50);
+    return () => clearTimeout(timer);
   }, [messages]);
 
   const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -303,13 +308,27 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   };
 
   const regenerateMessage = (msg: Message) => {
+    // Encontra a msg do user imediatamente antes desta resposta do assistant.
     const idx = messages.findIndex(m => m.id === msg.id);
     if (idx <= 0) return;
     const prevUser = messages
       .slice(0, idx)
       .reverse()
       .find(m => m.role === 'user');
-    if (prevUser) send(prevUser.content);
+    if (!prevUser) return;
+    // Remove a resposta antiga do assistant (será re-gerada).
+    // Mantém a msg do user — send() vai reusá-la via overrideText
+    // sem duplicar (envia o texto, mas não adiciona nova msg do user
+    // porque vamos remover a anterior também e deixar send recriar).
+    const userText = prevUser.content;
+    const userId = prevUser.id;
+    // Remove tanto a resposta antiga quanto a pergunta antiga.
+    // send() vai recriar ambas com novos IDs.
+    setMessages(prev =>
+      prev.filter(m => m.id !== msg.id && m.id !== userId),
+    );
+    // Pequeno delay p/ o setMessages aplicar antes do send.
+    setTimeout(() => send(userText), 0);
   };
 
   const deleteMessage = (msg: Message) => {
@@ -450,16 +469,25 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </TouchableOpacity>
       </View>
 
-      {/* Area de mensagens */}
-      <FlatList
-        ref={listRef}
-        data={messages}
-        renderItem={renderMessage}
-        keyExtractor={item => item.id ?? `idx-${item.content}`}
-        contentContainerStyle={s.list}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
-        keyboardShouldPersistTaps="handled"
-      />
+      {/* Area de mensagens — KeyboardAvoidingView ajusta p/ teclado */}
+      <KeyboardAvoidingView
+        style={{flex: 1}}
+        behavior={Platform.OS === 'android' ? undefined : 'padding'}
+        enabled>
+        <FlatList
+          ref={listRef}
+          data={messages}
+          renderItem={renderMessage}
+          keyExtractor={item => item.id ?? `idx-${item.content}`}
+          contentContainerStyle={s.list}
+          onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
+          onLayout={() => listRef.current?.scrollToEnd({animated: false})}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          automaticallyAdjustContentInsets={false}
+          contentInsetAdjustmentBehavior="never"
+        />
+      </KeyboardAvoidingView>
 
       {/* Status do gravador / transcrição */}
       {(recorder.status === 'processing' ||
