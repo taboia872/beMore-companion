@@ -266,7 +266,11 @@ function fetchBatch(
       }
     };
     xhr.onerror = () => {
-      if (!finished) finalize('error', 'Falha de rede ao conectar no servidor');
+      if (!finished) {
+        const status = xhr.status || 0;
+        const errText = xhr.responseText?.slice(0, 200) ?? '';
+        finalize('error', `Falha de rede (status ${status})${errText ? ': ' + errText : ''}`);
+      }
     };
     xhr.onabort = () => {
       if (!finished) finalize('aborted');
@@ -307,6 +311,7 @@ function streamNetwork(
     const parser = createThinkingParser(onEvent);
 
     const xhr = new XMLHttpRequest();
+    xhr.timeout = 60000; // 60s sem resposta = timeout
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
@@ -419,10 +424,17 @@ function streamNetwork(
       }
     };
     xhr.onerror = () => {
-      if (!finished) finalize('error', 'Falha de rede ao conectar no servidor');
+      if (!finished) {
+        const status = xhr.status || 0;
+        const errText = xhr.responseText?.slice(0, 200) ?? '';
+        finalize('error', `Falha de rede (status ${status})${errText ? ': ' + errText : ''}`);
+      }
     };
     xhr.onabort = () => {
       if (!finished) finalize('aborted');
+    };
+    xhr.ontimeout = () => {
+      if (!finished) finalize('error', 'Timeout: servidor não respondeu em 60s');
     };
 
     ctrl = xhr;

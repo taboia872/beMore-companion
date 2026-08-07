@@ -116,38 +116,6 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     setStreaming(true);
     assistantIdRef.current = assistantId;
 
-    // Atualiza a mensagem do assistant in-place por id. Aceita patch direto
-    // OU updater funcional (precisa do estado anterior p/ concatenar tokens).
-    // Token batching: acumula deltas e flush a cada 50ms para reduzir
-    // re-renders do FlatList durante streaming (performance em RN).
-    const pendingTokens = useRef<{content: string; thinking: string}>(
-      {content: '', thinking: ''},
-    );
-    const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    const flushPendingTokens = () => {
-      const {content: c, thinking: t} = pendingTokens.current;
-      if (!c && !t) return;
-      pendingTokens.current = {content: '', thinking: ''};
-      setMessages(prev =>
-        prev.map(m => {
-          if (m.id !== assistantId) return m;
-          return {
-            ...m,
-            content: m.content + c,
-            thinking: (m.thinking ?? '') + t,
-          };
-        }),
-      );
-    };
-
-    const batchToken = (field: 'content' | 'thinking', delta: string) => {
-      if (!delta) return;
-      pendingTokens.current[field] += delta;
-      if (flushTimer.current) clearTimeout(flushTimer.current);
-      flushTimer.current = setTimeout(flushPendingTokens, 50);
-    };
-
     const updateAssistant = (
       patchOrUpdater: Partial<Message> | ((prev: Message) => Partial<Message>),
     ) => {
@@ -175,16 +143,18 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         switch (event.type) {
           case 'reasoning':
           case 'thinking':
-            batchToken('thinking', event.delta);
-            updateAssistant({status: 'thinking'});
+            updateAssistant(prev => ({
+              thinking: (prev.thinking ?? '') + event.delta,
+              status: 'thinking',
+            }));
             break;
           case 'token':
-            batchToken('content', event.delta);
-            updateAssistant({status: 'streaming'});
+            updateAssistant(prev => ({
+              content: prev.content + event.delta,
+              status: 'streaming',
+            }));
             break;
           case 'done':
-            flushPendingTokens();
-            if (flushTimer.current) clearTimeout(flushTimer.current);
             updateAssistant({status: 'done'});
             break;
           case 'error':
@@ -212,8 +182,6 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         content: `⚠ ${errMsg}`,
       });
     } finally {
-      flushPendingTokens();
-      if (flushTimer.current) clearTimeout(flushTimer.current);
       setStreaming(false);
       assistantIdRef.current = null;
     }
