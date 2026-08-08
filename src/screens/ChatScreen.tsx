@@ -10,13 +10,49 @@ import {
   SafeAreaView,
   StatusBar,
   ActivityIndicator,
+  LayoutAnimation,
+  Platform,
+  UIManager,
+  KeyboardAvoidingView,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
-import {AppSettings, Message} from '../types';
-import {generateResponse} from '../services/LlmService';
+import {Clipboard} from 'react-native';
+import {AppSettings, Message, MessageStatus} from '../types';
+import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
-import {shortModelName} from '../utils/modelName';
+import {displayModelName} from '../utils/modelName';
+import Markdown from '@ronradtke/react-native-markdown-display';
+
+// Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+// Indicador de "typing" — três pontos que pulam em sequência (feedback
+// visual de que o modelo está processando). Animação em loop infinito.
+function TypingDots() {
+  const [active, setActive] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setActive(a => (a + 1) % 3);
+    }, 400);
+    return () => clearInterval(interval);
+  }, []);
+  return (
+    <View style={s.typingDots}>
+      {[0, 1, 2].map(i => (
+        <View
+          key={i}
+          style={[
+            s.typingDot,
+            active === i && s.typingDotActive,
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
 
 interface Props {
   settings: AppSettings;
@@ -27,46 +63,142 @@ interface Props {
 
 export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  // Modo thinking local ao chat — inicia DESLIGADO. Sem persistir em
+  // settings (foi removido do AppSettings); o usuário alterna em runtime
+  // pelo botão lâmpada dentro do input.
+  const [thinkingMode, setThinkingMode] = useState(false);
+  // Ids de mensagens com bloco de thinking expandido.
+  const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+
   const listRef = useRef<FlatList<Message>>(null);
+  const assistantIdRef = useRef<string | null>(null);
 
   const recorder = useRecorder();
   const whisper = useWhisper();
 
   useEffect(() => {
-    listRef.current?.scrollToEnd({animated: true});
+    // Pequeno delay p/ garantir que o layout foi atualizado antes do scroll.
+    const timer = setTimeout(() => {
+      listRef.current?.scrollToEnd({animated: false});
+    }, 50);
+    return () => clearTimeout(timer);
   }, [messages]);
 
-  const send = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg: Message = {role: 'user', content: input.trim()};
-    const newMsgs = [...messages, userMsg];
-    setMessages(() => newMsgs);
+  const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+  const send = async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
+    if (!text || streaming) return;
+
+    // Injeta instrução de thinking no system prompt dinamicamente quando ativo.
+    // Não persiste em settings — só para essa rodada (item 4 + 7).
+    // Usamos <think>... ( DeepSeek-R1 / Qwen3 / O1-style) em vez de
+    // <thinking> porque é o que a maioria dos modelos que suportam reasoning
+    // nativamente emite. Para modelos que não suportam, a instrução explícita
+    // pede <thinking> como fallback — o parser do LlmService reconhece ambas.
+    const sysContent = thinkingMode
+      ? `${settings.systemPrompt}\n\nBefore answering, reason step by step inside 🧠...💬 or ... tags, then write your final answer outside the tags. If you cannot produce these tags, wrap your reasoning in <thinking>...</thinking> instead.`
+      : settings.systemPrompt;
+
+    const userMsg: Message = {
+      role: 'user',
+      content: text,
+      id: genId(),
+    };
+    const assistantId = genId();
+    const assistantMsg: Message = {
+      role: 'assistant',
+      content: '',
+      thinking: '',
+      status: 'thinking' as MessageStatus,
+      id: assistantId,
+    };
+    const newMsgs = [...messages, userMsg, assistantMsg];
+    // Usa prev p/ não depender do snapshot de messages (race entre render e set).
+    setMessages(prev => [...prev, userMsg, assistantMsg]);
     setInput('');
-    setLoading(true);
+    setStreaming(true);
+    assistantIdRef.current = assistantId;
+
+    const updateAssistant = (
+      patchOrUpdater: Partial<Message> | ((prev: Message) => Partial<Message>),
+    ) => {
+      setMessages(prev =>
+        prev.map(m => {
+          if (m.id !== assistantId) return m;
+          const patch =
+            typeof patchOrUpdater === 'function'
+              ? patchOrUpdater(m)
+              : patchOrUpdater;
+          return {...m, ...patch};
+        }),
+      );
+    };
 
     try {
       const context: Message[] = [
-        {role: 'system', content: settings.systemPrompt},
-        ...newMsgs,
+        {role: 'system', content: sysContent},
+        ...newMsgs.filter(m => m.id !== assistantId),
       ];
-      const reply = await generateResponse(context, settings.llm);
-      setMessages(() => [...newMsgs, {role: 'assistant', content: reply}]);
+      await streamResponse(
+        context,
+        settings.llm,
+        event => {
+        switch (event.type) {
+          case 'reasoning':
+          case 'thinking':
+            updateAssistant(prev => ({
+              thinking: (prev.thinking ?? '') + event.delta,
+              status: 'thinking',
+            }));
+            break;
+          case 'token':
+            updateAssistant(prev => ({
+              content: prev.content + event.delta,
+              status: 'streaming',
+            }));
+            break;
+          case 'done':
+            updateAssistant({status: 'done'});
+            break;
+          case 'error':
+            updateAssistant({
+              status: 'error',
+              isError: true,
+              content: `⚠ ${event.message}`,
+            });
+            break;
+          case 'aborted':
+            updateAssistant(prev => ({
+              status: 'done',
+              content: (prev.content || '') + ' *[cancelado]*',
+            }));
+            break;
+        }
+      },
+        settings.streamingEnabled !== false,
+        thinkingMode,
+      );
     } catch (e) {
       const errMsg = (e as Error).message ?? String(e);
-      Alert.alert('Erro', errMsg);
-      setMessages(() => [
-        ...newMsgs,
-        {role: 'assistant', content: `⚠ ${errMsg}`, isError: true},
-      ]);
+      updateAssistant({
+        status: 'error',
+        isError: true,
+        content: `⚠ ${errMsg}`,
+      });
     } finally {
-      setLoading(false);
+      setStreaming(false);
+      assistantIdRef.current = null;
     }
   };
 
+  const stopGeneration = () => {
+    abortGeneration();
+    // abortGeneration dispara onabort do XHR -> onEvent('aborted') -> finally.
+  };
+
   const toggleMic = async () => {
-    // Checagem pré-gravação: STT não configurado? Avisa ANTES de gravar,
-    // em vez de iniciar e falhar depois —  evita a sensação de "travou".
     if (recorder.status === 'idle' || recorder.status === 'error') {
       if (!settings.sttModelPath?.trim()) {
         Alert.alert(
@@ -81,18 +213,15 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           Alert.alert('Microfone indisponível', recorder.errorMessage);
         }
       } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        Alert.alert('Erro ao iniciar microfone', msg);
+        Alert.alert('Erro ao iniciar microfone', (e as Error)?.message ?? String(e));
       }
       return;
     }
-    // Estado recording → parar e transcrever
     if (recorder.status === 'recording') {
       try {
         const path = await recorder.stop();
         if (!path) return;
         if (!settings.sttModelPath?.trim()) {
-          // Não deve chegar aqui (checamos antes de iniciar), mas defensive.
           Alert.alert(
             'STT não configurado',
             'Defina o caminho do modelo Whisper em Settings para transcrever voz.',
@@ -108,26 +237,15 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           Alert.alert('Vazio', 'Nenhuma fala detectada no áudio.');
         }
       } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        Alert.alert('Erro no microfone', msg);
+        Alert.alert('Erro no microfone', (e as Error)?.message ?? String(e));
       }
     }
   };
 
-  const renderItem = ({item}: {item: Message}) => (
-    <View
-      style={[
-        s.bubble,
-        item.role === 'user'
-          ? s.bubbleUser
-          : item.isError
-            ? s.bubbleError
-            : s.bubbleBot,
-      ]}>
-      <Text style={s.bubbleText}>{item.content}</Text>
-    </View>
-  );
-
+  // Nome de ícone do botão mic conforme estado do recorder.
+  // Returns usam `as const` p/ produzir literal válido do union
+  // MaterialIconsIconName (~2230 nomes). Sem isso, TS infere `string` e
+  // <Icon name={...}> rejeita (v13 scoped tem tipagem estrita no prop name).
   const micIconName = () => {
     if (recorder.status === 'recording') return 'stop' as const;
     if (recorder.status === 'processing') return 'hourglass-top' as const;
@@ -135,13 +253,204 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     return 'mic' as const;
   };
 
-  const micIconColor = (): string => {
-    if (recorder.status === 'recording') return '#fff';
-    if (recorder.status === 'error') return '#f85149';
-    return '#8b949e';
+  // Botão dinâmico à direita: mic | send | stop (item 8)
+  const renderActionBtn = () => {
+    if (streaming) {
+      return (
+        <TouchableOpacity style={[s.actionBtn, s.actionBtnStop]} onPress={stopGeneration}>
+          <Icon name="stop" size={22} color="#fff" />
+        </TouchableOpacity>
+      );
+    }
+    if (input.trim().length > 0) {
+      return (
+        <TouchableOpacity style={s.actionBtn} onPress={() => send()}>
+          <Icon name="send" size={20} color="#fff" />
+        </TouchableOpacity>
+      );
+    }
+    return (
+      <TouchableOpacity
+        style={[
+          s.actionBtn,
+          s.actionBtnMic,
+          recorder.status === 'recording' && s.actionBtnMicActive,
+          recorder.status === 'error' && s.actionBtnMicError,
+        ]}
+        onPress={toggleMic}
+        disabled={recorder.status === 'processing'}>
+        <Icon
+          name={micIconName()}
+          size={22}
+          color={
+            recorder.status === 'recording'
+              ? '#fff'
+              : recorder.status === 'error'
+                ? '#f85149'
+                : '#8b949e'
+          }
+        />
+      </TouchableOpacity>
+    );
   };
 
-  const headerTitle = shortModelName(settings.llm.model) || 'modelo';
+  const toggleThinkingExpanded = (id: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setExpandedThinking(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const copyMessage = (text: string) => {
+    if (text.trim()) Clipboard.setString(text);
+  };
+
+  const regenerateMessage = (msg: Message) => {
+    // Encontra a msg do user imediatamente antes desta resposta do assistant.
+    const idx = messages.findIndex(m => m.id === msg.id);
+    if (idx <= 0) return;
+    const prevUser = messages
+      .slice(0, idx)
+      .reverse()
+      .find(m => m.role === 'user');
+    if (!prevUser) return;
+    // Remove a resposta antiga do assistant (será re-gerada).
+    // Mantém a msg do user — send() vai reusá-la via overrideText
+    // sem duplicar (envia o texto, mas não adiciona nova msg do user
+    // porque vamos remover a anterior também e deixar send recriar).
+    const userText = prevUser.content;
+    const userId = prevUser.id;
+    // Remove tanto a resposta antiga quanto a pergunta antiga.
+    // send() vai recriar ambas com novos IDs.
+    setMessages(prev =>
+      prev.filter(m => m.id !== msg.id && m.id !== userId),
+    );
+    // Pequeno delay p/ o setMessages aplicar antes do send.
+    setTimeout(() => send(userText), 0);
+  };
+
+  const deleteMessage = (msg: Message) => {
+    setMessages(prev => {
+      const idx = prev.findIndex(m => m.id === msg.id);
+      if (idx < 0) return prev;
+      // Se assistant, remove tambem a pergunta do user imediatamente antes.
+      if (msg.role === 'assistant' && idx > 0 && prev[idx - 1].role === 'user') {
+        return prev.filter((_, i) => i !== idx && i !== idx - 1);
+      }
+      // Se user, remove a msg e a resposta do assistant depois dela.
+      if (msg.role === 'user' && idx < prev.length - 1 && prev[idx + 1].role === 'assistant') {
+        return prev.filter((_, i) => i !== idx && i !== idx + 1);
+      }
+      return prev.filter(m => m.id !== msg.id);
+    });
+  };
+
+  // Nome do ícone de thinking conforme estado do toggle (lâmpada acesa/apagada).
+  // as const em cada return para satisfazer a tipagem estrita do prop name
+  // do <Icon> (v13 scoped exige union MaterialIconsIconName).
+  const thinkingIconName = () => {
+    if (thinkingMode) return 'lightbulb' as const;
+    return 'lightbulb-outline' as const;
+  };
+
+  const renderMessage = ({item}: {item: Message}) => {
+    const isUser = item.role === 'user';
+    const isStreamingMsg =
+      !isUser && (item.status === 'thinking' || item.status === 'streaming');
+    // Tag de status so aparece durante o "pensando". Assim que o modelo
+    // comeca a responder (status streaming), a tag some e so fica o texto
+    // sendo escrito — evita "Processando..." concorrendo com o proprio output.
+    const statusLabel =
+      item.status === 'thinking'
+        ? 'Pensando...'
+        : item.status === 'streaming'
+          ? null  // token-a-token não precisa de label — o texto aparecendo já é o feedback
+          : null;
+    const expanded = item.id ? expandedThinking.has(item.id) : false;
+    const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
+
+    return (
+      <View
+        style={[
+          s.bubble,
+          isUser
+            ? s.bubbleUser
+            : item.isError
+              ? s.bubbleError
+              : s.bubbleBot,
+        ]}>
+        {/* status de geração — feedback de "pensando" */}
+        {statusLabel && (
+          <View style={s.statusRow}>
+            <ActivityIndicator size="small" color="#58a6ff" />
+            <Text style={s.statusText}>{statusLabel}</Text>
+            <TypingDots />
+          </View>
+        )}
+        {/* bloco pensamento expansível (item 4) */}
+        {showThinkingToggle && (
+          <TouchableOpacity
+            style={s.thinkingToggle}
+            onPress={() => item.id && toggleThinkingExpanded(item.id)}
+            activeOpacity={0.7}>
+            <Icon
+              name={expanded ? 'expand-less' : 'expand-more'}
+              size={16}
+              color="#8b949e"
+            />
+            <Text style={s.thinkingToggleLabel}>
+              {expanded ? 'Ocultar pensamento' : 'Ver pensamento'}
+            </Text>
+          </TouchableOpacity>
+        )}
+        {showThinkingToggle && expanded && (
+          <View style={s.thinkingBox}>
+            <Text style={s.thinkingText}>{item.thinking}</Text>
+          </View>
+        )}
+        {/* conteúdo principal */}
+        {(item.content || !isStreamingMsg) && (
+          isUser ? (
+            <Text style={[s.bubbleText, s.bubbleTextUser]}>
+              {item.content}
+            </Text>
+          ) : (
+            <Markdown style={mdStyle}>{item.content}</Markdown>
+          )
+        )}
+        {/* Action bar estilo llama-ui: icones apos a mensagem. */}
+        {!isStreamingMsg && !item.isError && (
+          <View style={s.actionBar}>
+            <TouchableOpacity
+              style={s.actionBarItem}
+              onPress={() => copyMessage(item.content)}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="content-copy" size={15} color="#8b949e" />
+            </TouchableOpacity>
+            {!isUser && (
+              <TouchableOpacity
+                style={s.actionBarItem}
+                onPress={() => regenerateMessage(item)}
+                hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                <Icon name="refresh" size={15} color="#8b949e" />
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={s.actionBarItem}
+              onPress={() => deleteMessage(item)}
+              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+              <Icon name="delete-outline" size={15} color="#8b949e" />
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  const headerTitle = displayModelName(settings.llm.model) || 'modelo';
 
   return (
     <SafeAreaView style={s.safe}>
@@ -161,19 +470,29 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </TouchableOpacity>
       </View>
 
-      {/* Area de mensagens */}
-      <FlatList
-        ref={listRef}
-        data={messages}
-        renderItem={renderItem}
-        keyExtractor={(_, i) => String(i)}
-        contentContainerStyle={s.list}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
-        keyboardShouldPersistTaps="handled"
-      />
+      {/* Area de mensagens — KeyboardAvoidingView ajusta p/ teclado */}
+      <KeyboardAvoidingView
+        style={{flex: 1}}
+        behavior={Platform.OS === 'android' ? undefined : 'padding'}
+        enabled>
+        <FlatList
+          ref={listRef}
+          data={messages}
+          renderItem={renderMessage}
+          keyExtractor={item => item.id ?? `idx-${item.content}`}
+          contentContainerStyle={s.list}
+          onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
+          onLayout={() => listRef.current?.scrollToEnd({animated: false})}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          automaticallyAdjustContentInsets={false}
+          contentInsetAdjustmentBehavior="never"
+        />
+      </KeyboardAvoidingView>
 
       {/* Status do gravador / transcrição */}
-      {(recorder.status === 'processing' || whisper.status === 'transcribing') && (
+      {(recorder.status === 'processing' ||
+        whisper.status === 'transcribing') && (
         <View style={s.statusBar}>
           <ActivityIndicator size="small" color="#58a6ff" />
           <Text style={s.statusText}>
@@ -184,44 +503,91 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </View>
       )}
 
-      {/* Input bar */}
+      {/* Input bar — botao de thinking DENTRO do campo (sem contorno). */}
       <View style={s.inputBar}>
-        <TouchableOpacity
-          style={[
-            s.micBtn,
-            recorder.status === 'recording' && s.micBtnActive,
-            recorder.status === 'error' && s.micBtnError,
-            recorder.status === 'processing' && s.micBtnDisabled,
-          ]}
-          onPress={toggleMic}
-          disabled={recorder.status === 'processing'}>
-          <Icon name={micIconName()} size={22} color={micIconColor()} />
-        </TouchableOpacity>
+        <View style={s.inputWrap}>
+          {/* Toggle thinking — icone lâmpada dentro do input, alinhado a esquerda.
+              Sem backgroundColor/border: so o icone, p/ nao poluir a UI. */}
+          <TouchableOpacity
+            style={s.thinkingBtn}
+            onPress={() => setThinkingMode(v => !v)}
+            hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+            <Icon
+              name={thinkingIconName()}
+              size={22}
+              color={thinkingMode ? '#58a6ff' : '#8b949e'}
+            />
+          </TouchableOpacity>
 
-        <TextInput
-          style={s.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Mensagem..."
-          placeholderTextColor="#aab2bc"
-          multiline
-        />
+          <TextInput
+            style={s.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder="Mensagem..."
+            placeholderTextColor="#aab2bc"
+            multiline
+            // minHeight/maxHeight via style (nao como props diretas —
+            // TextInputProps nao aceita). 1 linha (44px) ate 5 (124px);
+            // acima disso o proprio TextInput ativa scroll interno (item 5).
+            maxLength={8000}
+          />
+        </View>
 
-        <TouchableOpacity
-          style={[s.sendBtn, loading && s.sendBtnDisabled]}
-          onPress={send}
-          disabled={loading}>
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Icon name="send" size={20} color="#fff" />
-          )}
-        </TouchableOpacity>
+        {renderActionBtn()}
       </View>
     </SafeAreaView>
   );
 }
 
+// Estilos para o renderizador de Markdown (dark theme).
+// Sobrescreve apenas as cores — tipografia herda do tema da bubble.
+const mdStyle = StyleSheet.create({
+  body: {color: '#e6edf3', fontSize: 15, lineHeight: 21},
+  heading1: {color: '#e6edf3', fontSize: 22, fontWeight: '700', marginTop: 8, marginBottom: 6},
+  heading2: {color: '#e6edf3', fontSize: 19, fontWeight: '700', marginTop: 6, marginBottom: 4},
+  heading3: {color: '#e6edf3', fontSize: 17, fontWeight: '600', marginTop: 4, marginBottom: 3},
+  heading4: {color: '#e6edf3', fontSize: 16, fontWeight: '600'},
+  heading5: {color: '#e6edf3', fontSize: 15, fontWeight: '600'},
+  heading6: {color: '#8b949e', fontSize: 14, fontWeight: '600'},
+  code_inline: {
+    color: '#f0883e',
+    backgroundColor: '#0d1117',
+    paddingHorizontal: 4,
+    borderRadius: 3,
+    fontFamily: 'monospace',
+  },
+  code_block: {
+    color: '#e6edf3',
+    backgroundColor: '#0d1117',
+    padding: 10,
+    borderRadius: 6,
+    fontFamily: 'monospace',
+    fontSize: 13,
+  },
+  fence: {
+    color: '#e6edf3',
+    backgroundColor: '#0d1117',
+    padding: 10,
+    borderRadius: 6,
+    fontFamily: 'monospace',
+    fontSize: 13,
+  },
+  blockquote: {
+    backgroundColor: '#0d1117',
+    borderLeftWidth: 3,
+    borderLeftColor: '#58a6ff',
+    paddingLeft: 10,
+    paddingVertical: 4,
+    marginVertical: 4,
+  },
+  link: {color: '#58a6ff', textDecorationLine: 'underline'},
+  list_item: {color: '#e6edf3', marginVertical: 2},
+  bullet_list: {color: '#e6edf3'},
+  ordered_list: {color: '#e6edf3'},
+  em: {color: '#e6edf3', fontStyle: 'italic'},
+  strong: {color: '#fff', fontWeight: '700'},
+  text: {color: '#e6edf3'},
+});
 
 const s = StyleSheet.create({
   safe: {
@@ -277,6 +643,72 @@ const s = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
   },
+  bubbleTextUser: {
+    color: '#fff',
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  statusText: {
+    color: '#58a6ff',
+    fontSize: 13,
+  },
+  thinkingToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+    paddingVertical: 2,
+    alignSelf: 'flex-start',
+  },
+  thinkingToggleLabel: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  typingDots: {
+    flexDirection: 'row',
+    gap: 3,
+    marginLeft: 2,
+  },
+  typingDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: '#30363d',
+  },
+  typingDotActive: {
+    backgroundColor: '#58a6ff',
+  },
+  thinkingBox: {
+    backgroundColor: '#0d1117',
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#21262d',
+  },
+  actionBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    marginTop: 6,
+    paddingTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+    opacity: 0.7,
+  },
+  actionBarItem: {
+    padding: 4,
+  },
+  thinkingText: {
+    color: '#8b949e',
+    fontSize: 12,
+    lineHeight: 16,
+  },
   statusBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -284,10 +716,6 @@ const s = StyleSheet.create({
     paddingVertical: 6,
     backgroundColor: '#161b22',
     gap: 8,
-  },
-  statusText: {
-    color: '#58a6ff',
-    fontSize: 13,
   },
   inputBar: {
     flexDirection: 'row',
@@ -299,37 +727,32 @@ const s = StyleSheet.create({
     backgroundColor: '#0d1117',
     gap: 8,
   },
-  micBtn: {
-    width: 44,
-    height: 44,
+  inputWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
     borderRadius: 22,
-    backgroundColor: '#21262d',
+    backgroundColor: '#161b22',
+  },
+  thinkingBtn: {
+    // Dentro do input — sem contorno, so o icone. Posicionado a esquerda.
+    width: 40,
+    height: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  micBtnActive: {
-    backgroundColor: '#da3633',
-  },
-  micBtnError: {
-    backgroundColor: '#3d1f1f',
-    borderWidth: 1,
-    borderColor: '#f85149',
-  },
-  micBtnDisabled: {
-    opacity: 0.5,
+    paddingLeft: 4,
   },
   input: {
     flex: 1,
     minHeight: 44,
-    maxHeight: 120,
-    paddingHorizontal: 12,
+    maxHeight: 124, // ~5 linhas; acima disso scroll interno (item 5)
+    paddingHorizontal: 8,
     paddingVertical: 10,
-    borderRadius: 22,
-    backgroundColor: '#161b22',
     color: '#e6edf3',
     fontSize: 15,
+    textAlignVertical: 'center',
   },
-  sendBtn: {
+  actionBtn: {
     width: 44,
     height: 44,
     borderRadius: 22,
@@ -337,7 +760,18 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  sendBtnDisabled: {
-    opacity: 0.5,
+  actionBtnStop: {
+    backgroundColor: '#da3633',
+  },
+  actionBtnMic: {
+    backgroundColor: '#21262d',
+  },
+  actionBtnMicActive: {
+    backgroundColor: '#da3633',
+  },
+  actionBtnMicError: {
+    backgroundColor: '#3d1f1f',
+    borderWidth: 1,
+    borderColor: '#f85149',
   },
 });
