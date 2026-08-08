@@ -74,6 +74,7 @@ export function createThinkingParser(onEvent: StreamCallback) {
     ['<reason>', '</reason>'],
     ['<thought>', '</thought>'],
     ['<Thought>', '</Thought>'],
+    ['<think>', '</think>'],
     ['🧠', '💬'],
   ];
 
@@ -242,6 +243,11 @@ function fetchBatch(
     }
     xhr.onreadystatechange = () => {
       if (xhr.readyState === 4 && !finished) {
+        // Status 0 = abortado antes de resposta. Trata como abort.
+        if (xhr.status === 0 || xhr.status === undefined) {
+          finalize('aborted');
+          return;
+        }
         if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const json = JSON.parse(xhr.responseText);
@@ -268,6 +274,15 @@ function fetchBatch(
     xhr.onerror = () => {
       if (!finished) {
         const status = xhr.status || 0;
+        // Status 0 com finished=false pode ser abort seguido de onerror.
+        // Se ctrl já foi nullado (abort), finalize('aborted') já foi chamado
+        // — this check evita double-finalize. Se não foi abort, é erro real.
+        if (status === 0) {
+          // Pode ser abort ou falta de rede sem resposta. Trata como abort
+          // silencioso para evitar mensagem de erro confusa no chat.
+          finalize('aborted');
+          return;
+        }
         const errText = xhr.responseText?.slice(0, 200) ?? '';
         finalize('error', `Falha de rede (status ${status})${errText ? ': ' + errText : ''}`);
       }
@@ -281,6 +296,7 @@ function fetchBatch(
         model: config.model || 'local-model',
         messages: sanitizeContext(messages),
         stream: false,
+        reasoning_format: 'parsed',
       }),
     );
   });
@@ -299,10 +315,19 @@ function streamNetwork(
     }
 
     const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    // reasoning_format: 'parsed' pede ao servidor para separar o raciocínio
+    // em um campo dedicado (reasoning_content/reasoning) em vez de inline
+    // no `content` com tags. Suportado por Groq, OpenRouter e vLLM.
+    // Ignorado silenciosamente por servidores que não reconhecem o parâmetro
+    // (Gemini, Ollama puro, etc).
+    // NOTA: include_reasoning (OpenRouter) e reasoning_format (Groq) são
+    // mutuamente exclusivos — não enviar ambos. reasoning_format é mais
+    // amplamente suportado e cobre Groq + vLLM.
     const payload = JSON.stringify({
       model: config.model || 'local-model',
       messages: sanitizeContext(messages),
       stream: true,
+      reasoning_format: 'parsed',
     });
 
     // Parser de thinking: reconhece <thinking> e  tags.
@@ -415,6 +440,13 @@ function streamNetwork(
     xhr.onprogress = () => flush(false);
     xhr.onreadystatechange = () => {
       if (xhr.readyState === 4 && !finished) {
+        // Status 0 = requisição abortada ou rede indisponível antes de
+        // qualquer resposta do servidor. Trata como abort, não erro,
+        // para evitar "API 0:" no chat.
+        if (xhr.status === 0 || xhr.status === undefined) {
+          finalize('aborted');
+          return;
+        }
         if (xhr.status >= 200 && xhr.status < 300) {
           flush(true);
         } else {
@@ -426,6 +458,10 @@ function streamNetwork(
     xhr.onerror = () => {
       if (!finished) {
         const status = xhr.status || 0;
+        if (status === 0) {
+          finalize('aborted');
+          return;
+        }
         const errText = xhr.responseText?.slice(0, 200) ?? '';
         finalize('error', `Falha de rede (status ${status})${errText ? ': ' + errText : ''}`);
       }

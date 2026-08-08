@@ -18,6 +18,18 @@
 -->
 <network-security-config>
     <!--
+      Base: cleartext PERMITIDO por padrão.
+      Necessário porque o app se conecta a servidores na LAN (Ollama,
+      LM Studio, llama.cpp) e localhost via HTTP. O Android NSC não
+      suporta ranges CIDR; sem este base-config, TODA conexão HTTP é
+      bloqueada (incluindo localhost e LAN — Android 9+, API 28+).
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+    <!--
       Domínios externos onde cleartext (HTTP) é PROIBIDO.
       Força HTTPS para provedores de IA onde a API key trafega.
       Estes domínios só funcionam via HTTPS — se o usuário apontar

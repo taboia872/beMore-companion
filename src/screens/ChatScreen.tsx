@@ -98,7 +98,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // nativamente emite. Para modelos que não suportam, a instrução explícita
     // pede <thinking> como fallback — o parser do LlmService reconhece ambas.
     const sysContent = thinkingMode
-      ? `${settings.systemPrompt}\n\nBefore answering, reason step by step inside <think>... tags, then write your final answer outside the tags. If you cannot produce think tags, wrap your reasoning in <thinking>...</thinking> instead.`
+      ? `${settings.systemPrompt}\n\nBefore answering, reason step by step inside 🧠...💬 or ... tags, then write your final answer outside the tags. If you cannot produce these tags, wrap your reasoning in <thinking>...</thinking> instead.`
       : settings.systemPrompt;
 
     const userMsg: Message = {
