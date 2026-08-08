@@ -27,8 +27,12 @@ export function shortModelName(id: string | undefined | null): string {
   if (!trimmed) return '';
   // Normaliza barras Windows para Unix antes de quebrar.
   const parts = trimmed.replace(/\\/g, '/').split('/').filter(Boolean);
-  const last = parts[parts.length - 1];
-  return last || trimmed;
+  const last = parts[parts.length - 1] || trimmed;
+  // Capitaliza a primeira letra para exibição mais limpa na lista.
+  if (last.length > 0) {
+    return last.charAt(0).toUpperCase() + last.slice(1);
+  }
+  return last;
 }
 
 /**

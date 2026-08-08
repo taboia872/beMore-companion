@@ -97,13 +97,22 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   // Derivado da URL atual — se a URL match um preset, seleciona ele; senão, custom.
   const [serverDropdownOpen, setServerDropdownOpen] = useState(false);
 
-  // Detecta qual preset corresponde à URL atual (match de substring case-insensitive).
-  // Se nenhum match, é "Personalizado".
+  // Detecta qual preset corresponde à URL atual (match de hostname).
+  // Se a URL é vazia E o usuário ainda não escolheu nada, assume o primeiro
+  // preset como default. Mas se o usuário limpou a URL ao selecionar
+  // "Personalizado", retorna CUSTOM_SERVER (URL vazia = custom em branco).
   const detectPreset = (url: string): string => {
-    if (!url?.trim()) return SERVER_PRESETS[0].url; // default: primeiro preset
-    const lower = url.toLowerCase().replace(/\/$/, '');
+    if (!url?.trim()) {
+      // URL vazia: se o draft já tem provider=localhost com URL vazia,
+      // assumimos que é "Personalizado" (usuário limpou deliberadamente).
+      return CUSTOM_SERVER;
+    }
+    const lower = url.toLowerCase().replace(/\/+$/, '');
     for (const p of SERVER_PRESETS) {
-      if (lower === p.url.toLowerCase().replace(/\/$/, '')) return p.url;
+      // Compara por hostname (ex: api.groq.com) para tolerar paths diferentes
+      const presetHost = p.url.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+      const urlHost = lower.replace(/^https?:\/\//, '').split('/')[0];
+      if (urlHost === presetHost) return p.url;
     }
     return CUSTOM_SERVER;
   };
@@ -189,11 +198,14 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     setFetchingModels(true);
     setModelFilter('all'); // reset filtro ao buscar novos modelos
     try {
-      const baseUrl = draft.llm.baseUrl.replace(/\/$/, '');
+      const baseUrl = draft.llm.baseUrl.replace(/\/+$/, '');
 
-      // Detecta provedores que têm endpoint público de listagem de modelos
-      // com metadados de pricing (paid/free). Para esses, usar o endpoint
-      // expandido. Para outros, /models padrão OpenAI-compatível.
+      // Cada servidor pode ter um endpoint diferente para listar modelos.
+      // AIHorde: endpoint é /v1/models (falta o /v1 no preset URL).
+      // OpenRouter: endpoint público com pricing info.
+      // Google AI Studio: endpoint v1beta/models.
+      // HuggingFace: API pública diferente.
+      // Demais: /models padrão OpenAI-compatível.
       let url: string;
       if (baseUrl.includes('openrouter.ai')) {
         url = 'https://openrouter.ai/api/v1/models';
@@ -201,6 +213,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         url = 'https://generativelanguage.googleapis.com/v1beta/models';
       } else if (baseUrl.includes('huggingface.co')) {
         url = 'https://huggingface.co/api/models?inference=warm&limit=100';
+      } else if (baseUrl.includes('aihorde.net')) {
+        // AIHorde: o preset URL é https://oai.aihorde.net (sem /v1).
+        // O endpoint de models é /v1/models.
+        url = `${baseUrl}/v1/models`;
       } else {
         url = `${baseUrl}/models`;
       }
@@ -224,6 +240,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
         return;
       }
+      // Ordena alfabeticamente (case-insensitive).
+      ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
       setAvailableModels(ids);
       setShowModelsModal(true);
     } catch (e) {
@@ -239,13 +257,14 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   };
 
   /**
-   * Detecta se um modelo é gratuito. Convenções:
-   * - OpenRouter: modelos gratuitos têm `:free` no id (ex: "meta-llama/llama-3.2-3b:free")
-   * - Google AI Studio: modelos Gemini são gratuitos (tier free)
-   * - Groq: todos gratuitos
-   * - AIHorde: todos gratuitos (comunidade)
-   * - HuggingFace: assume pago (precisa API key, modelos paid)
-   * - Outros: assume pago a menos que tenha `:free`
+   * Detecta se um modelo é gratuito. A detecção varia por servidor:
+   * - OpenRouter: modelos gratuitos têm `:free` no id
+   * - Google AI Studio: todos os gemini-* são free tier
+   * - Groq: TODOS os modelos são gratuitos
+   * - AIHorde: TODOS os modelos são gratuitos (crowdsourced)
+   * - HuggingFace: assume pago (precisa de API key, modelos paid)
+   * - NVIDIA: presume free tier (NVIDIA oferece free credits)
+   * - Outros/Ollama/llama.cpp: assume pago (modelos locais não têm noção de free)
    */
   const isFreeModel = (id: string): boolean => {
     const lower = id.toLowerCase();
@@ -253,8 +272,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     if (lower.endsWith(':free')) return true;
     // Google AI Studio: todos os gemini-* são free tier
     if (lower.startsWith('gemini-') || lower.startsWith('models/gemini-')) return true;
-    // AIHorde: todos gratuitos
-    if (selectedPreset === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
+    // Detecta pelo servidor selecionado
+    const hostname = detectPreset(draft.llm.baseUrl);
+    if (hostname === SERVER_PRESETS.find(p => p.name === 'Groq')?.url) return true;
+    if (hostname === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
     return false;
   };
 

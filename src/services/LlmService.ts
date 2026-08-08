@@ -62,6 +62,35 @@ function sanitizeContext(messages: Message[]): Array<{
 // A função retorna um objeto com `routeDelta` (alimentar novo texto), `flushPending` (esmagar buffer remanescente no fim) e estado `inThinking`.
 
 /**
+ * Determina o valor de reasoning_format a enviar conforme o servidor.
+ * - llama.cpp (local): 'deepseek' (separa em reasoning_content)
+ * - Groq/OpenRouter/vLLM (nuvem): 'parsed' (separa em reasoning/reasoning_content)
+ * - Outros (Gemini, HuggingFace, etc): não envia (depende do tag parser inline)
+ * Retorna null se o servidor não suporta reasoning_format.
+ */
+function getReasoningFormat(baseUrl: string): string | null {
+  if (!baseUrl) return null;
+  const url = baseUrl.toLowerCase();
+  // llama.cpp server: suporta 'deepseek' e 'none'
+  if (isLocalServer(url)) {
+    // llama.cpp com --reasoning-format deepseek separa em reasoning_content.
+    // Sem o parametro, o default é 'none' (tags inline no content).
+    return 'deepseek';
+  }
+  // Groq, OpenRouter, vLLM: suportam 'parsed'
+  if (
+    url.includes('groq.com') ||
+    url.includes('openrouter.ai') ||
+    url.includes('nvidia.com')
+  ) {
+    return 'parsed';
+  }
+  // HuggingFace, Gemini, AIHorde, outros: não suportam reasoning_format.
+  // O tag parser inline (createThinkingParser) cuida das tags.
+  return null;
+}
+
+/**
  * Detecta se a URL do servidor aponta para um servidor local (Ollama,
  * LM Studio, llama.cpp) rodando em localhost ou LAN. Servidores locais
  * frequentemente rejeitam parâmetros não-padronizados como `reasoning_format`
@@ -359,11 +388,14 @@ function fetchBatch(
       stream: false,
     };
 
-    // Só envia reasoning_format se thinking ativo e não for servidor local puro.
-    // Servidores locais (Ollama, LM Studio, llama.cpp) não reconhecem esse
-    // parâmetro e podem rejeitar com erro 500 "formato de pensamento desconhecido".
-    if (thinkingEnabled && !isLocalServer(config.baseUrl)) {
-      payload.reasoning_format = 'parsed';
+    // Só envia reasoning_format se thinking ativo.
+    // O valor depende do servidor: 'deepseek' para llama.cpp local,
+    // 'parsed' para Groq/OpenRouter/vLLM, null (não envia) para outros.
+    // Servidores que não reconhecem o parâmetro rejeitam com erro 500/400 —
+    // é mais seguro só enviar quando o servidor suporta.
+    if (thinkingEnabled) {
+      const rf = getReasoningFormat(config.baseUrl);
+      if (rf) payload.reasoning_format = rf;
     }
 
     xhr.send(JSON.stringify(payload));
@@ -399,11 +431,15 @@ function streamNetwork(
       stream: true,
     };
 
-    // Só envia reasoning_format se thinking ativo E não for servidor local.
-    // Servidores locais (Ollama, LM Studio, llama.cpp) não reconhecem o
-    // parâmetro e podem rejeitar com erro 500 "formato de pensamento desconhecido".
-    if (thinkingEnabled && !isLocalServer(config.baseUrl)) {
-      payload.reasoning_format = 'parsed';
+    // Só envia reasoning_format se thinking ativo.
+    // O valor depende do servidor: 'deepseek' para llama.cpp local (separa em
+    // reasoning_content), 'parsed' para Groq/OpenRouter/vLLM (separa em
+    // reasoning), null (não envia) para Gemini/HuggingFace/AIHorde que não
+    // suportam o parâmetro. Sem o parâmetro, modelos de reasoning emitem
+    // tags inline no content — o tag parser (createThinkingParser) cuida.
+    if (thinkingEnabled) {
+      const rf = getReasoningFormat(config.baseUrl);
+      if (rf) payload.reasoning_format = rf;
     }
 
     const payloadStr = JSON.stringify(payload);

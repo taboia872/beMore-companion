@@ -750,7 +750,7 @@ const s = StyleSheet.create({
     paddingVertical: 10,
     color: '#e6edf3',
     fontSize: 15,
-    textAlignVertical: 'top',
+    textAlignVertical: 'center',
   },
   actionBtn: {
     width: 44,
