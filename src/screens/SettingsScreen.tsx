@@ -59,7 +59,7 @@ const SERVER_PRESETS: ServerPreset[] = [
   {name: 'HuggingFace', url: 'https://router.huggingface.co/v1', icon: 'pets', hasFreeModels: true},
   {name: 'Groq', url: 'https://api.groq.com/openai/v1', icon: 'bolt', hasFreeModels: true},
   {name: 'NVIDIA', url: 'https://integrate.api.nvidia.com/v1', icon: 'memory', hasFreeModels: true},
-  {name: 'AIHorde', url: 'https://oai.aihorde.net', icon: 'groups', hasFreeModels: true},
+  {name: 'AIHorde', url: 'https://oai.aihorde.net/v1', icon: 'groups', hasFreeModels: true},
 ];
 
 // Valor especial que identifica a opção "Personalizado" no dropdown.
@@ -213,10 +213,6 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         url = 'https://generativelanguage.googleapis.com/v1beta/models';
       } else if (baseUrl.includes('huggingface.co')) {
         url = 'https://huggingface.co/api/models?inference=warm&limit=100';
-      } else if (baseUrl.includes('aihorde.net')) {
-        // AIHorde: o preset URL é https://oai.aihorde.net (sem /v1).
-        // O endpoint de models é /v1/models.
-        url = `${baseUrl}/v1/models`;
       } else {
         url = `${baseUrl}/models`;
       }

@@ -63,21 +63,29 @@ function sanitizeContext(messages: Message[]): Array<{
 
 /**
  * Determina o valor de reasoning_format a enviar conforme o servidor.
- * - llama.cpp (local): 'deepseek' (separa em reasoning_content)
- * - Groq/OpenRouter/vLLM (nuvem): 'parsed' (separa em reasoning/reasoning_content)
- * - Outros (Gemini, HuggingFace, etc): não envia (depende do tag parser inline)
+ *
+ * - llama.cpp / Ollama / LM Studio (local): NÃO envia (null). O tag parser
+ *   inline (createThinkingParser) já separa as tags <think>/<thinking> do
+ *   content automaticamente, sem precisar do parâmetro. Enviar
+ *   'deepseek' sem o servidor ter sido iniciado com --reasoning-format
+ *   deepseek causa erro ou é ignorado — mais seguro não enviar.
+ *
+ * - Groq / OpenRouter / NVIDIA (nuvem): 'parsed' (separa reasoning em campo
+ *   dedicado no SSE delta). Estes servidores suportam o parâmetro natively.
+ *
+ * - HuggingFace / Gemini / AIHorde / outros: NÃO envia (null). Não suportam
+ *   reasoning_format. O tag parser inline cuida das tags.
+ *
  * Retorna null se o servidor não suporta reasoning_format.
  */
 function getReasoningFormat(baseUrl: string): string | null {
   if (!baseUrl) return null;
   const url = baseUrl.toLowerCase();
-  // llama.cpp server: suporta 'deepseek' e 'none'
+  // Servidores locais: não enviar — tag parser inline cuida das tags.
   if (isLocalServer(url)) {
-    // llama.cpp com --reasoning-format deepseek separa em reasoning_content.
-    // Sem o parametro, o default é 'none' (tags inline no content).
-    return 'deepseek';
+    return null;
   }
-  // Groq, OpenRouter, vLLM: suportam 'parsed'
+  // Groq, OpenRouter, NVIDIA: suportam 'parsed'
   if (
     url.includes('groq.com') ||
     url.includes('openrouter.ai') ||
@@ -238,44 +246,44 @@ export function streamResponse(
   thinkingEnabled = false,
 ): Promise<void> {
   if (config.provider === 'localhost') {
+    // Quando thinking está DESLIGADO, suprimimos o pensamento: o tag parser
+    // ainda captura as tags  do content, mas os eventos de 'thinking'
+    // são descartados pelo wrapper — o usuário não vê o bloco de pensamento
+    // nem recebe as tags como texto. O conteúdo DENTRO das tags é perdido
+    // (não vira resposta, não vira thinking) — o modelo "pensa" em silêncio.
+    const wrappedOnEvent: StreamCallback = (event) => {
+      if (!thinkingEnabled && event.type === 'thinking') {
+        // Modo thinking OFF: descarta o conteúdo de thinking.
+        return;
+      }
+      onEvent(event);
+    };
+
     // Wrapper que intercepta erros 400 de reasoning_format e faz retry
-    // automático sem o parâmetro. Modelos como DeepSeek Flash V4 (NVIDIA)
-    // e Llama 3.3 70B (Groq) não suportam reasoning_format — o servidor
-    // rejeita com 400. O retry desliga thinkingEnabled, que remove
-    // reasoning_format do payload, e também não injeta o system prompt
-    // de thinking (o caller já fez isso, mas no retry o onEvent é
-    // passado direto sem reprocessar o system prompt).
+    // automático sem o parâmetro.
     return new Promise<void>(resolve => {
       let retried = false;
-      const wrappedOnEvent: StreamCallback = (event) => {
+      const errorWrappedOnEvent: StreamCallback = (event) => {
         if (
           event.type === 'error' &&
           !retried &&
           event.message.includes('400') &&
           event.message.toLowerCase().includes('reasoning_format')
         ) {
-          // Retry sem reasoning_format — a requisição atual já falhou.
-          // Inicia nova chamada sem thinkingEnabled.
           retried = true;
           const retryFn = streamingEnabled ? streamNetwork : fetchBatch;
-          retryFn(
-            messages,
-            config,
-            onEvent,  // onEvent direto — sem wrapper no retry
-            false,    // thinkingEnabled=false: não envia reasoning_format
-          ).then(() => resolve());
+          retryFn(messages, config, wrappedOnEvent, false).then(() => resolve());
           return;
         }
-        onEvent(event);
+        wrappedOnEvent(event);
         if (event.type === 'done' || event.type === 'aborted') {
           resolve();
         }
       };
       const fn = streamingEnabled ? streamNetwork : fetchBatch;
-      fn(messages, config, wrappedOnEvent, thinkingEnabled).then(() => resolve());
+      fn(messages, config, errorWrappedOnEvent, thinkingEnabled).then(() => resolve());
     });
   }
-  // Modo local (llama.rn) — não implementado ainda. Emita erro e termina.
   onEvent({type: 'error', message: 'Local model ainda não implementado'});
   return Promise.resolve();
 }
