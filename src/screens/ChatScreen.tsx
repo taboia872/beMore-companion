@@ -14,15 +14,20 @@ import {
   Platform,
   UIManager,
   KeyboardAvoidingView,
+  Image as RNImage,
+  ActionSheetIOS,
+  ScrollView,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
-import {AppSettings, Message, MessageStatus} from '../types';
+import {AppSettings, Message, MessageStatus, ContentPart} from '../types';
 import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
 import {displayModelName} from '../utils/modelName';
+import {getTextContent, getImageUrls, hasImages} from '../utils/messageContent';
 import Markdown from '@ronradtke/react-native-markdown-display';
+import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
 
 // Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -70,6 +75,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   const [thinkingMode, setThinkingMode] = useState(false);
   // Ids de mensagens com bloco de thinking expandido.
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+  // Imagens pendentes anexadas pelo usuário (preview antes de enviar).
+  // Cada item tem {uri, base64} — base64 é o data URI enviado na API.
+  const [pendingImages, setPendingImages] = useState<Array<{uri: string; base64: string; mime: string}>>([]);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -89,21 +97,37 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
   const send = async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
-    if (!text || streaming) return;
+    // Pode enviar se tem texto OU imagens pendentes.
+    if ((!text && pendingImages.length === 0) || streaming) return;
 
     // Injeta instrução de thinking no system prompt dinamicamente quando ativo.
-    // Não persiste em settings — só para essa rodada (item 4 + 7).
-    // Usamos <think>... ( DeepSeek-R1 / Qwen3 / O1-style) em vez de
-    // <thinking> porque é o que a maioria dos modelos que suportam reasoning
-    // nativamente emite. Para modelos que não suportam, a instrução explícita
-    // pede <thinking> como fallback — o parser do LlmService reconhece ambas.
+    // Só funciona no modo local (provider === 'local'). Quando online, o
+    // botão de thinking é escondido da UI, então thinkingMode deve ser false.
     const sysContent = thinkingMode
       ? `${settings.systemPrompt}\n\nBefore answering, reason step by step inside 🧠...💬 or ... tags, then write your final answer outside the tags. If you cannot produce these tags, wrap your reasoning in <thinking>...</thinking> instead.`
       : settings.systemPrompt;
 
+    // Constrói content: multimodal (array) se há imagens, senão string.
+    let userContent: string | ContentPart[];
+    if (pendingImages.length > 0) {
+      const parts: ContentPart[] = [];
+      if (text) {
+        parts.push({type: 'text', text});
+      }
+      for (const img of pendingImages) {
+        parts.push({
+          type: 'image_url',
+          image_url: {url: `data:${img.mime};base64,${img.base64}`},
+        });
+      }
+      userContent = parts;
+    } else {
+      userContent = text;
+    }
+
     const userMsg: Message = {
       role: 'user',
-      content: text,
+      content: userContent,
       id: genId(),
     };
     const assistantId = genId();
@@ -118,6 +142,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // Usa prev p/ não depender do snapshot de messages (race entre render e set).
     setMessages(prev => [...prev, userMsg, assistantMsg]);
     setInput('');
+    setPendingImages([]);
     setStreaming(true);
     assistantIdRef.current = assistantId;
 
@@ -198,6 +223,87 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // abortGeneration dispara onabort do XHR -> onEvent('aborted') -> finally.
   };
 
+  // --- Anexar imagem (câmera ou galeria) ---
+  // ActionSheet no iOS, Alert com botões no Android (mesma UX).
+  const showImagePicker = () => {
+    const options = ['Tirar foto', 'Escolher da galeria', 'Cancelar'];
+    ActionSheetIOS.showActionSheetWithOptions(
+      {
+        title: 'Anexar imagem',
+        options,
+        cancelButtonIndex: 2,
+      },
+      (idx) => {
+        if (idx === 0) pickFromCamera();
+        else if (idx === 1) pickFromGallery();
+      },
+    );
+  };
+
+  // Fallback Android (ActionSheetIOS é iOS-only). Usamos Alert com botões.
+  const showImagePickerAndroid = () => {
+    Alert.alert(
+      'Anexar imagem',
+      'Escolha a origem',
+      [
+        {text: 'Tirar foto', onPress: () => pickFromCamera()},
+        {text: 'Escolher da galeria', onPress: () => pickFromGallery()},
+        {text: 'Cancelar', style: 'cancel'},
+      ],
+    );
+  };
+
+  const pickFromCamera = async () => {
+    try {
+      const result = await launchCamera({
+        mediaType: 'photo',
+        quality: 0.8,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        includeBase64: true,
+        cameraType: 'back',
+      });
+      if (result.didCancel || !result.assets?.length) return;
+      const asset = result.assets[0];
+      if (!asset.base64) {
+        Alert.alert('Erro', 'Não foi possível obter a imagem.');
+        return;
+      }
+      const mime = asset.type ?? 'image/jpeg';
+      setPendingImages(prev => [...prev, {uri: asset.uri!, base64: asset.base64!, mime}]);
+    } catch (e) {
+      Alert.alert('Erro na câmera', (e as Error)?.message ?? String(e));
+    }
+  };
+
+  const pickFromGallery = async () => {
+    try {
+      const result = await launchImageLibrary({
+        mediaType: 'photo',
+        quality: 0.8,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        includeBase64: true,
+        selectionLimit: 0, // 0 = sem limite (multiseleção)
+      });
+      if (result.didCancel || !result.assets?.length) return;
+      const newImages = result.assets
+        .filter(a => a.base64 && a.uri)
+        .map(a => ({uri: a.uri!, base64: a.base64!, mime: a.type ?? 'image/jpeg'}));
+      if (newImages.length === 0) {
+        Alert.alert('Erro', 'Não foi possível obter as imagens.');
+        return;
+      }
+      setPendingImages(prev => [...prev, ...newImages]);
+    } catch (e) {
+      Alert.alert('Erro na galeria', (e as Error)?.message ?? String(e));
+    }
+  };
+
+  const removePendingImage = (idx: number) => {
+    setPendingImages(prev => prev.filter((_, i) => i !== idx));
+  };
+
   const toggleMic = async () => {
     if (recorder.status === 'idle' || recorder.status === 'error') {
       if (!settings.sttModelPath?.trim()) {
@@ -262,7 +368,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </TouchableOpacity>
       );
     }
-    if (input.trim().length > 0) {
+    if (input.trim().length > 0 || pendingImages.length > 0) {
       return (
         <TouchableOpacity style={s.actionBtn} onPress={() => send()}>
           <Icon name="send" size={20} color="#fff" />
@@ -304,7 +410,8 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     });
   };
 
-  const copyMessage = (text: string) => {
+  const copyMessage = (msg: Message) => {
+    const text = getTextContent(msg);
     if (text.trim()) Clipboard.setString(text);
   };
 
@@ -317,11 +424,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       .reverse()
       .find(m => m.role === 'user');
     if (!prevUser) return;
-    // Remove a resposta antiga do assistant (será re-gerada).
-    // Mantém a msg do user — send() vai reusá-la via overrideText
-    // sem duplicar (envia o texto, mas não adiciona nova msg do user
-    // porque vamos remover a anterior também e deixar send recriar).
-    const userText = prevUser.content;
+    // Extrai texto da mensagem do user (pode ser multimodal, mas regenerate
+    // só reenvia o texto — imagens não são reanexadas automaticamente).
+    const userText = getTextContent(prevUser);
     const userId = prevUser.id;
     // Remove tanto a resposta antiga quanto a pergunta antiga.
     // send() vai recriar ambas com novos IDs.
@@ -412,21 +517,41 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           </View>
         )}
         {/* conteúdo principal */}
-        {(item.content || !isStreamingMsg) && (
-          isUser ? (
-            <Text style={[s.bubbleText, s.bubbleTextUser]}>
-              {item.content}
-            </Text>
-          ) : (
-            <Markdown style={mdStyle}>{item.content}</Markdown>
-          )
+        {(getTextContent(item) || !isStreamingMsg || hasImages(item)) && (
+          <>
+            {/* Imagens anexadas (multimodal) — exibidas acima do texto */}
+            {hasImages(item) && (
+              <View style={s.imageRow}>
+                {getImageUrls(item).map((url, imgIdx) => (
+                  <RNImage
+                    key={imgIdx}
+                    source={{uri: url}}
+                    style={s.chatImage}
+                    resizeMode="cover"
+                  />
+                ))}
+              </View>
+            )}
+            {/* Texto da mensagem */}
+            {(() => {
+              const text = getTextContent(item);
+              if (!text) return null;
+              return isUser ? (
+                <Text style={[s.bubbleText, s.bubbleTextUser]}>
+                  {text}
+                </Text>
+              ) : (
+                <Markdown style={mdStyle}>{text}</Markdown>
+              );
+            })()}
+          </>
         )}
         {/* Action bar estilo llama-ui: icones apos a mensagem. */}
         {!isStreamingMsg && !item.isError && (
           <View style={s.actionBar}>
             <TouchableOpacity
               style={s.actionBarItem}
-              onPress={() => copyMessage(item.content)}
+              onPress={() => copyMessage(item)}
               hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
               <Icon name="content-copy" size={15} color="#8b949e" />
             </TouchableOpacity>
@@ -479,7 +604,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           ref={listRef}
           data={messages}
           renderItem={renderMessage}
-          keyExtractor={item => item.id ?? `idx-${item.content}`}
+          keyExtractor={item => item.id ?? `idx-${getTextContent(item).slice(0, 20)}`}
           contentContainerStyle={s.list}
           onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
           onLayout={() => listRef.current?.scrollToEnd({animated: false})}
@@ -503,21 +628,53 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         </View>
       )}
 
-      {/* Input bar — botao de thinking DENTRO do campo (sem contorno). */}
+      {/* Preview das imagens pendentes (acima da input bar) */}
+      {pendingImages.length > 0 && (
+        <View style={s.pendingImagesRow}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            {pendingImages.map((img, idx) => (
+              <View key={idx} style={s.pendingImageWrap}>
+                <RNImage
+                  source={{uri: img.uri}}
+                  style={s.pendingImage}
+                  resizeMode="cover"
+                />
+                <TouchableOpacity
+                  style={s.pendingImageRemove}
+                  onPress={() => removePendingImage(idx)}>
+                  <Icon name="close" size={14} color="#fff" />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Input bar — botão de anexo (clip) + thinking (só local) dentro do campo. */}
       <View style={s.inputBar}>
         <View style={s.inputWrap}>
-          {/* Toggle thinking — icone lâmpada dentro do input, alinhado a esquerda.
-              Sem backgroundColor/border: so o icone, p/ nao poluir a UI. */}
+          {/* Botão de anexar imagem (clip) — sempre disponível */}
           <TouchableOpacity
-            style={s.thinkingBtn}
-            onPress={() => setThinkingMode(v => !v)}
+            style={s.attachBtn}
+            onPress={Platform.OS === 'ios' ? showImagePicker : showImagePickerAndroid}
             hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-            <Icon
-              name={thinkingIconName()}
-              size={22}
-              color={thinkingMode ? '#58a6ff' : '#8b949e'}
-            />
+            <Icon name="attach-file" size={22} color="#8b949e" />
           </TouchableOpacity>
+
+          {/* Toggle thinking — só visível no modo local (provider === 'local').
+              Online, o botão é escondido (thinking é controlado pelo servidor). */}
+          {settings.llm.provider === 'local' && (
+            <TouchableOpacity
+              style={s.thinkingBtn}
+              onPress={() => setThinkingMode(v => !v)}
+              hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+              <Icon
+                name={thinkingIconName()}
+                size={22}
+                color={thinkingMode ? '#58a6ff' : '#8b949e'}
+              />
+            </TouchableOpacity>
+          )}
 
           <TextInput
             style={s.input}
@@ -742,6 +899,14 @@ const s = StyleSheet.create({
     alignItems: 'center',
     paddingLeft: 4,
   },
+  attachBtn: {
+    // Botão de anexar imagem (clip) — mesma estrutura do thinkingBtn.
+    width: 40,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingLeft: 4,
+  },
   input: {
     flex: 1,
     minHeight: 44,
@@ -773,5 +938,47 @@ const s = StyleSheet.create({
     backgroundColor: '#3d1f1f',
     borderWidth: 1,
     borderColor: '#f85149',
+  },
+  // --- Imagens no chat (multimodal) ---
+  imageRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginBottom: 8,
+  },
+  chatImage: {
+    width: 200,
+    height: 200,
+    borderRadius: 8,
+  },
+  // --- Preview de imagens pendentes (acima da input bar) ---
+  pendingImagesRow: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    backgroundColor: '#0d1117',
+    borderTopWidth: 1,
+    borderTopColor: '#21262d',
+  },
+  pendingImageWrap: {
+    position: 'relative',
+    marginRight: 8,
+  },
+  pendingImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 8,
+  },
+  pendingImageRemove: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#da3633',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#0d1117',
   },
 });

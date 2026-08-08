@@ -1,4 +1,4 @@
-import {LlmConfig, Message} from '../types';
+import {LlmConfig, Message, ContentPart} from '../types';
 
 /**
  * Eventos de stream emitidos para a UI conforme os tokens chegam.
@@ -37,13 +37,28 @@ export type StreamCallback = (event: StreamEvent) => void;
  * Mensagens de erro são feedback visual local — não devem virar prompt.
  * Também descarta campos internos (status, thinking) que não pertencem ao
  * payload enviado ao servidor.
+ *
+ * Lida com content multimodal: se a mensagem tem content como string, envia
+ * string. Se tem content como array de partes (ContentPart[]), envia o array
+ * no formato OpenAI-compatível. Mensagens com content vazio (string vazia OU
+ * array sem partes de texto/ imagem) são filtradas.
  */
 function sanitizeContext(messages: Message[]): Array<{
   role: Message['role'];
-  content: string;
+  content: string | ContentPart[];
 }> {
   return messages
-    .filter(m => !m.isError && m.content.trim() !== '')
+    .filter(m => {
+      if (m.isError) return false;
+      if (typeof m.content === 'string') return m.content.trim() !== '';
+      // Array de partes — filtra se não tem texto e não tem imagem
+      if (Array.isArray(m.content)) {
+        return m.content.some(
+          p => (p.type === 'text' && p.text?.trim()) || p.type === 'image_url',
+        );
+      }
+      return false;
+    })
     .map(m => ({role: m.role, content: m.content}));
 }
 

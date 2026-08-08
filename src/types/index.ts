@@ -17,9 +17,28 @@ export interface LlmConfig {
  */
 export type MessageStatus = 'thinking' | 'streaming' | 'done' | 'error';
 
+/**
+ * Uma parte do conteúdo de uma mensagem multimodal.
+ * - 'text'     : texto puro
+ * - 'image_url': imagem anexada (base64 data URI ou URL)
+ */
+export interface ContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: {
+    url: string; // data:image/jpeg;base64,... ou URL https://
+    detail?: 'auto' | 'low' | 'high';
+  };
+}
+
 export interface Message {
   role: 'system' | 'user' | 'assistant';
-  content: string;
+  /**
+   * Conteúdo da mensagem. Pode ser texto puro (string) ou um array de
+   * partes (multimodal: texto + imagem). O formato OpenAI-compatível aceita
+   * ambos; o LlmService converte para o formato apropriado no payload.
+   */
+  content: string | ContentPart[];
   /**
    * Identificador único estável — usado p/ atualizar uma mensagem in-place
    * durante o streaming (acumular tokens no assistant placeholder sem
