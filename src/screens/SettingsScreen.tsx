@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettings, LlmProvider} from '../types';
-import {saveSettings} from '../data/appSettings';
+import {saveSettings, loadApiKeyForServer, saveApiKeyForServer} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
 
 /**
@@ -110,17 +110,30 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
   const selectedPreset = detectPreset(draft.llm.baseUrl);
 
-  const selectPreset = (presetUrl: string) => {
+  const selectPreset = async (presetUrl: string) => {
+    setServerDropdownOpen(false);
+
     if (presetUrl === CUSTOM_SERVER) {
       // Se mudando para personalizado, limpa a URL p/ o usuário digitar.
       // Mas se já era custom e apenas re-selecionando, mantém.
       if (selectedPreset !== CUSTOM_SERVER) {
-        updateLlm({baseUrl: ''});
+        // Antes de trocar, salva a chave atual associada ao servidor atual.
+        if (draft.llm.apiKey && draft.llm.baseUrl) {
+          await saveApiKeyForServer(draft.llm.baseUrl, draft.llm.apiKey);
+        }
+        updateLlm({baseUrl: '', apiKey: ''});
       }
-    } else {
-      updateLlm({baseUrl: presetUrl});
+      return;
     }
-    setServerDropdownOpen(false);
+
+    // Antes de trocar, salva a chave atual associada ao servidor atual.
+    if (draft.llm.apiKey && draft.llm.baseUrl && draft.llm.baseUrl !== presetUrl) {
+      await saveApiKeyForServer(draft.llm.baseUrl, draft.llm.apiKey);
+    }
+
+    // Troca para o novo servidor e carrega a chave salva (se existir).
+    const savedKey = await loadApiKeyForServer(presetUrl);
+    updateLlm({baseUrl: presetUrl, apiKey: savedKey});
   };
 
   // Nome amigável do servidor selecionado p/ exibir no botão do dropdown.
