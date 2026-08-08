@@ -59,8 +59,28 @@ function sanitizeContext(messages: Message[]): Array<{
 // então mantemos um buffer de bytes suspeitos (fim de chunk que pode ser
 // prefixo de uma tag de abertura/fechamento).
 //
-// A função retorna um objeto com `routeDelta` (alimentar novo texto),
-// `flushPending` (esmagar buffer remanescente no fim) e estado `inThinking`.
+// A função retorna um objeto com `routeDelta` (alimentar novo texto), `flushPending` (esmagar buffer remanescente no fim) e estado `inThinking`.
+
+/**
+ * Detecta se a URL do servidor aponta para um servidor local (Ollama,
+ * LM Studio, llama.cpp) rodando em localhost ou LAN. Servidores locais
+ * frequentemente rejeitam parâmetros não-padronizados como `reasoning_format`
+ * com erro 500, então usamos isso para decidir se incluímos o parâmetro.
+ */
+function isLocalServer(baseUrl: string): boolean {
+  if (!baseUrl) return true; // sem URL — assume local p/ segurança
+  const url = baseUrl.toLowerCase();
+  return (
+    url.includes('127.0.0.1') ||
+    url.includes('localhost') ||
+    url.includes('0.0.0.0') ||
+    // IPs LAN privados (RFC1918) — Ollama/LM Studio em rede doméstica
+    /^https?:\/\/192\.168\./.test(url) ||
+    /^https?:\/\/10\./.test(url) ||
+    /^https?:\/\/172\.(1[6-9]|2[0-9]|3[01])\./.test(url)
+  );
+}
+
 export function createThinkingParser(onEvent: StreamCallback) {
   // Pares de tags suportados, ordenados para que prefixes mais longos
   // sejam testados primeiro (evita mismatches parciais). Modelos locais
@@ -186,13 +206,47 @@ export function streamResponse(
   config: LlmConfig,
   onEvent: StreamCallback,
   streamingEnabled = true,
+  thinkingEnabled = false,
 ): Promise<void> {
   if (config.provider === 'localhost') {
-    return streamingEnabled
-      ? streamNetwork(messages, config, onEvent)
-      : fetchBatch(messages, config, onEvent);
+    // Wrapper que intercepta erros 400 de reasoning_format e faz retry
+    // automático sem o parâmetro. Modelos como DeepSeek Flash V4 (NVIDIA)
+    // e Llama 3.3 70B (Groq) não suportam reasoning_format — o servidor
+    // rejeita com 400. O retry desliga thinkingEnabled, que remove
+    // reasoning_format do payload, e também não injeta o system prompt
+    // de thinking (o caller já fez isso, mas no retry o onEvent é
+    // passado direto sem reprocessar o system prompt).
+    return new Promise<void>(resolve => {
+      let retried = false;
+      const wrappedOnEvent: StreamCallback = (event) => {
+        if (
+          event.type === 'error' &&
+          !retried &&
+          event.message.includes('400') &&
+          event.message.toLowerCase().includes('reasoning_format')
+        ) {
+          // Retry sem reasoning_format — a requisição atual já falhou.
+          // Inicia nova chamada sem thinkingEnabled.
+          retried = true;
+          const retryFn = streamingEnabled ? streamNetwork : fetchBatch;
+          retryFn(
+            messages,
+            config,
+            onEvent,  // onEvent direto — sem wrapper no retry
+            false,    // thinkingEnabled=false: não envia reasoning_format
+          ).then(() => resolve());
+          return;
+        }
+        onEvent(event);
+        if (event.type === 'done' || event.type === 'aborted') {
+          resolve();
+        }
+      };
+      const fn = streamingEnabled ? streamNetwork : fetchBatch;
+      fn(messages, config, wrappedOnEvent, thinkingEnabled).then(() => resolve());
+    });
   }
-  // Modo local (llama.rn) — não implementado ainda. Emite erro e termina.
+  // Modo local (llama.rn) — não implementado ainda. Emita erro e termina.
   onEvent({type: 'error', message: 'Local model ainda não implementado'});
   return Promise.resolve();
 }
@@ -206,6 +260,7 @@ function fetchBatch(
   messages: Message[],
   config: LlmConfig,
   onEvent: StreamCallback,
+  thinkingEnabled = false,
 ): Promise<void> {
   return new Promise<void>(resolve => {
     if (!config.baseUrl) {
@@ -291,14 +346,27 @@ function fetchBatch(
       if (!finished) finalize('aborted');
     };
     ctrl = xhr;
-    xhr.send(
-      JSON.stringify({
-        model: config.model || 'local-model',
-        messages: sanitizeContext(messages),
-        stream: false,
-        reasoning_format: 'parsed',
-      }),
-    );
+
+    // Constrói payload: reasoning_format só vai se thinking estiver ativo
+    // E o servidor parecer ser um que suporta esse parâmetro (nuvem, não
+    // llama.cpp/Ollama puro que rejeita campos desconhecidos com 500).
+    // heurística: se a URL contém /v1 e não é localhost puro (127.0.0.1/localhost),
+    // provavelmente é OpenRouter/Groq/vLLM que aceitam reasoning_format.
+    // Para servidores locais (Ollama, LM Studio, llama.cpp), omitimos.
+    const payload: Record<string, unknown> = {
+      model: config.model || 'local-model',
+      messages: sanitizeContext(messages),
+      stream: false,
+    };
+
+    // Só envia reasoning_format se thinking ativo e não for servidor local puro.
+    // Servidores locais (Ollama, LM Studio, llama.cpp) não reconhecem esse
+    // parâmetro e podem rejeitar com erro 500 "formato de pensamento desconhecido".
+    if (thinkingEnabled && !isLocalServer(config.baseUrl)) {
+      payload.reasoning_format = 'parsed';
+    }
+
+    xhr.send(JSON.stringify(payload));
   });
 }
 
@@ -306,6 +374,7 @@ function streamNetwork(
   messages: Message[],
   config: LlmConfig,
   onEvent: StreamCallback,
+  thinkingEnabled = false,
 ): Promise<void> {
   return new Promise<void>(resolve => {
     if (!config.baseUrl) {
@@ -318,17 +387,26 @@ function streamNetwork(
     // reasoning_format: 'parsed' pede ao servidor para separar o raciocínio
     // em um campo dedicado (reasoning_content/reasoning) em vez de inline
     // no `content` com tags. Suportado por Groq, OpenRouter e vLLM.
-    // Ignorado silenciosamente por servidores que não reconhecem o parâmetro
-    // (Gemini, Ollama puro, etc).
+    // Ignorado silenciosamente por servidores que não o reconhecem (Gemini,
+    // Ollama puro). SEM enviar se thinking desligado (toggle do usuário)
+    // ou se for servidor local (Ollama/LM Studio rejeitam com 500).
     // NOTA: include_reasoning (OpenRouter) e reasoning_format (Groq) são
     // mutuamente exclusivos — não enviar ambos. reasoning_format é mais
     // amplamente suportado e cobre Groq + vLLM.
-    const payload = JSON.stringify({
+    const payload: Record<string, unknown> = {
       model: config.model || 'local-model',
       messages: sanitizeContext(messages),
       stream: true,
-      reasoning_format: 'parsed',
-    });
+    };
+
+    // Só envia reasoning_format se thinking ativo E não for servidor local.
+    // Servidores locais (Ollama, LM Studio, llama.cpp) não reconhecem o
+    // parâmetro e podem rejeitar com erro 500 "formato de pensamento desconhecido".
+    if (thinkingEnabled && !isLocalServer(config.baseUrl)) {
+      payload.reasoning_format = 'parsed';
+    }
+
+    const payloadStr = JSON.stringify(payload);
 
     // Parser de thinking: reconhece <thinking> e  tags.
     // As tags podem chegar fatiadas entre chunks — o parser mantém um buffer
@@ -474,7 +552,7 @@ function streamNetwork(
     };
 
     ctrl = xhr;
-    xhr.send(payload);
+    xhr.send(payloadStr);
   });
 }
 

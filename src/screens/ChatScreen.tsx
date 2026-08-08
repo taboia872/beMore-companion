@@ -178,6 +178,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         }
       },
         settings.streamingEnabled !== false,
+        thinkingMode,
       );
     } catch (e) {
       const errMsg = (e as Error).message ?? String(e);

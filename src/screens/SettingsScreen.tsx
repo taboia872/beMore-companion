@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useState, useRef, useEffect} from 'react';
 import {
   View,
   Text,
@@ -38,6 +38,33 @@ interface RemoteModel {
   id: string;
 }
 
+/**
+ * Presets de servidores online compatíveis com OpenAI API.
+ * O usuário seleciona um da lista e a URL é preenchida automaticamente.
+ * A última opção "Personalizado" abre um campo de texto livre.
+ */
+interface ServerPreset {
+  name: string;
+  url: string;
+  /** Nome do ícone MaterialIconsIconName p/ o botão do dropdown. */
+  icon: string;
+  /** Se true, o servidor oferece modelos gratuitos (filtro relevante no modal). */
+  hasFreeModels?: boolean;
+}
+
+const SERVER_PRESETS: ServerPreset[] = [
+  {name: 'Google AI Studio', url: 'https://generativelanguage.googleapis.com/v1beta/openai/', icon: 'auto-awesome', hasFreeModels: true},
+  {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', icon: 'route', hasFreeModels: true},
+  {name: 'Ollama Cloud', url: 'https://ollama.com/v1', icon: 'cloud-queue'},
+  {name: 'HuggingFace', url: 'https://router.huggingface.co/v1', icon: 'pets', hasFreeModels: true},
+  {name: 'Groq', url: 'https://api.groq.com/openai/v1', icon: 'bolt', hasFreeModels: true},
+  {name: 'NVIDIA', url: 'https://integrate.api.nvidia.com/v1', icon: 'memory', hasFreeModels: true},
+  {name: 'AIHorde', url: 'https://oai.aihorde.net', icon: 'groups', hasFreeModels: true},
+];
+
+// Valor especial que identifica a opção "Personalizado" no dropdown.
+const CUSTOM_SERVER = '__custom__';
+
 interface CardProps {
   title: string;
   icon: string; // MaterialIconsIconName válido
@@ -63,6 +90,70 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [showModelsModal, setShowModelsModal] = useState(false);
+  // Filtro de modelos no modal: 'all' | 'free' | 'paid'
+  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'paid'>('all');
+
+  // Dropdown de servidor: qual preset está selecionado, ou CUSTOM_SERVER.
+  // Derivado da URL atual — se a URL match um preset, seleciona ele; senão, custom.
+  const [serverDropdownOpen, setServerDropdownOpen] = useState(false);
+
+  // Detecta qual preset corresponde à URL atual (match de substring case-insensitive).
+  // Se nenhum match, é "Personalizado".
+  const detectPreset = (url: string): string => {
+    if (!url?.trim()) return SERVER_PRESETS[0].url; // default: primeiro preset
+    const lower = url.toLowerCase().replace(/\/$/, '');
+    for (const p of SERVER_PRESETS) {
+      if (lower === p.url.toLowerCase().replace(/\/$/, '')) return p.url;
+    }
+    return CUSTOM_SERVER;
+  };
+
+  const selectedPreset = detectPreset(draft.llm.baseUrl);
+
+  const selectPreset = (presetUrl: string) => {
+    if (presetUrl === CUSTOM_SERVER) {
+      // Se mudando para personalizado, limpa a URL p/ o usuário digitar.
+      // Mas se já era custom e apenas re-selecionando, mantém.
+      if (selectedPreset !== CUSTOM_SERVER) {
+        updateLlm({baseUrl: ''});
+      }
+    } else {
+      updateLlm({baseUrl: presetUrl});
+    }
+    setServerDropdownOpen(false);
+  };
+
+  // Nome amigável do servidor selecionado p/ exibir no botão do dropdown.
+  const selectedServerName = (): string => {
+    if (selectedPreset === CUSTOM_SERVER) return 'Personalizado';
+    const preset = SERVER_PRESETS.find(p => p.url === selectedPreset);
+    return preset?.name ?? 'Personalizado';
+  };
+
+  // Ícone do servidor selecionado p/ exibir no botão do dropdown.
+  const selectedServerIcon = (): string => {
+    if (selectedPreset === CUSTOM_SERVER) return 'edit';
+    const preset = SERVER_PRESETS.find(p => p.url === selectedPreset);
+    return preset?.icon ?? 'dns';
+  };
+
+
+  // Toast — balão temporizado que aparece no topo e some sozinho.
+  // Substitui o Alert.alert('Salvo', ...) por algo menos intrusivo.
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    };
+  }, []);
 
   const updateLlm = (patch: Partial<AppSettings['llm']>) =>
     setDraft(d => ({...d, llm: {...d.llm, ...patch}}));
@@ -71,7 +162,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     try {
       await saveSettings(draft);
       onChange(draft);
-      Alert.alert('Salvo', 'Configurações salvas.');
+      showToast('Configurações salvas');
     } catch (e) {
       Alert.alert('Erro ao salvar', (e as Error).message ?? String(e));
     }
@@ -83,8 +174,24 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
       return;
     }
     setFetchingModels(true);
+    setModelFilter('all'); // reset filtro ao buscar novos modelos
     try {
-      const url = `${draft.llm.baseUrl.replace(/\/$/, '')}/models`;
+      const baseUrl = draft.llm.baseUrl.replace(/\/$/, '');
+
+      // Detecta provedores que têm endpoint público de listagem de modelos
+      // com metadados de pricing (paid/free). Para esses, usar o endpoint
+      // expandido. Para outros, /models padrão OpenAI-compatível.
+      let url: string;
+      if (baseUrl.includes('openrouter.ai')) {
+        url = 'https://openrouter.ai/api/v1/models';
+      } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
+        url = 'https://generativelanguage.googleapis.com/v1beta/models';
+      } else if (baseUrl.includes('huggingface.co')) {
+        url = 'https://huggingface.co/api/models?inference=warm&limit=100';
+      } else {
+        url = `${baseUrl}/models`;
+      }
+
       const response = await fetch(url, {
         method: 'GET',
         headers: {
@@ -118,6 +225,38 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     setShowModelsModal(false);
   };
 
+  /**
+   * Detecta se um modelo é gratuito. Convenções:
+   * - OpenRouter: modelos gratuitos têm `:free` no id (ex: "meta-llama/llama-3.2-3b:free")
+   * - Google AI Studio: modelos Gemini são gratuitos (tier free)
+   * - Groq: todos gratuitos
+   * - AIHorde: todos gratuitos (comunidade)
+   * - HuggingFace: assume pago (precisa API key, modelos paid)
+   * - Outros: assume pago a menos que tenha `:free`
+   */
+  const isFreeModel = (id: string): boolean => {
+    const lower = id.toLowerCase();
+    // OpenRouter: convenção :free no id
+    if (lower.endsWith(':free')) return true;
+    // Google AI Studio: todos os gemini-* são free tier
+    if (lower.startsWith('gemini-') || lower.startsWith('models/gemini-')) return true;
+    // AIHorde: todos gratuitos
+    if (selectedPreset === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
+    return false;
+  };
+
+  // Modelos filtrados conforme seleção do filtro no modal
+  const filteredModels = availableModels.filter(id => {
+    if (modelFilter === 'all') return true;
+    if (modelFilter === 'free') return isFreeModel(id);
+    // 'paid' = tudo que não é free
+    return !isFreeModel(id);
+  });
+
+  // Conta quantos grátis e pagos existem para exibir nos botões
+  const freeCount = availableModels.filter(isFreeModel).length;
+  const paidCount = availableModels.length - freeCount;
+
   return (
     <View style={s.overlay}>
       <StatusBar
@@ -133,6 +272,16 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         </TouchableOpacity>
         <Text style={s.headerTitle}>Configurações</Text>
       </View>
+
+      {/* Toast — balão temporizado que aparece no topo e some em 2.5s */}
+      {toast && (
+        <View style={s.toastWrap} pointerEvents="none">
+          <View style={s.toast}>
+            <Icon name="check-circle" size={18} color="#3fb950" />
+            <Text style={s.toastText}>{toast}</Text>
+          </View>
+        </View>
+      )}
 
       <ScrollView contentContainerStyle={s.container}>
         {/* Card: Provedor + dados conforme tipo (item 6 — agrupado) */}
@@ -175,17 +324,110 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
           {draft.llm.provider === 'localhost' ? (
             <>
-              <Text style={s.label}>URL do servidor</Text>
-              <TextInput
-                style={s.input}
-                value={draft.llm.baseUrl}
-                placeholder="http://192.168.0.10:11434/v1"
-                placeholderTextColor="#aab2bc"
-                autoCapitalize="none"
-                autoCorrect={false}
-                onChangeText={v => updateLlm({baseUrl: v})}
-              />
-              <Text style={s.hint}>Ollama, LM Studio, llama.cpp server, etc.</Text>
+              {/* Dropdown de servidor — presets + opção Personalizado */}
+              <Text style={s.label}>Servidor</Text>
+              <TouchableOpacity
+                style={s.dropdownBtn}
+                onPress={() => setServerDropdownOpen(v => !v)}>
+                <Icon
+                  name={selectedServerIcon() as any}
+                  size={20}
+                  color="#58a6ff"
+                />
+                <Text style={s.dropdownBtnText} numberOfLines={1}>
+                  {selectedServerName()}
+                </Text>
+                <Icon
+                  name={serverDropdownOpen ? 'expand-less' : 'expand-more'}
+                  size={22}
+                  color="#8b949e"
+                />
+              </TouchableOpacity>
+
+              {/* Lista de opções do dropdown */}
+              {serverDropdownOpen && (
+                <View style={s.dropdownList}>
+                  {SERVER_PRESETS.map(preset => (
+                    <TouchableOpacity
+                      key={preset.url}
+                      style={[
+                        s.dropdownItem,
+                        selectedPreset === preset.url && s.dropdownItemActive,
+                      ]}
+                      onPress={() => selectPreset(preset.url)}>
+                      <Icon
+                        name={preset.icon as any}
+                        size={18}
+                        color={selectedPreset === preset.url ? '#58a6ff' : '#8b949e'}
+                      />
+                      <Text
+                        style={[
+                          s.dropdownItemText,
+                          selectedPreset === preset.url && s.dropdownItemTextActive,
+                        ]}
+                        numberOfLines={1}>
+                        {preset.name}
+                      </Text>
+                      {preset.hasFreeModels && (
+                        <View style={s.freeBadge}>
+                          <Text style={s.freeBadgeText}>FREE</Text>
+                        </View>
+                      )}
+                      {selectedPreset === preset.url && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                  {/* Opção Personalizado */}
+                  <TouchableOpacity
+                    style={[
+                      s.dropdownItem,
+                      selectedPreset === CUSTOM_SERVER && s.dropdownItemActive,
+                    ]}
+                    onPress={() => selectPreset(CUSTOM_SERVER)}>
+                    <Icon
+                      name="edit"
+                      size={18}
+                      color={selectedPreset === CUSTOM_SERVER ? '#58a6ff' : '#8b949e'}
+                    />
+                    <Text
+                      style={[
+                        s.dropdownItemText,
+                        selectedPreset === CUSTOM_SERVER && s.dropdownItemTextActive,
+                      ]}
+                      numberOfLines={1}>
+                      Personalizado
+                    </Text>
+                    {selectedPreset === CUSTOM_SERVER && (
+                      <Icon name="check" size={18} color="#3fb950" />
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {/* Campo de URL — só visível quando Personalizado */}
+              {selectedPreset === CUSTOM_SERVER && (
+                <>
+                  <Text style={s.label}>URL do servidor</Text>
+                  <TextInput
+                    style={s.input}
+                    value={draft.llm.baseUrl}
+                    placeholder="http://192.168.0.10:11434/v1"
+                    placeholderTextColor="#aab2bc"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    onChangeText={v => updateLlm({baseUrl: v})}
+                  />
+                  <Text style={s.hint}>Ollama, LM Studio, llama.cpp server, etc.</Text>
+                </>
+              )}
+
+              {/* URL do preset selecionado (read-only, informativo) */}
+              {selectedPreset !== CUSTOM_SERVER && (
+                <Text style={s.urlDisplay} numberOfLines={2}>
+                  {selectedPreset}
+                </Text>
+              )}
 
               <Text style={s.label}>API Key (opcional)</Text>
               <TextInput
@@ -310,23 +552,66 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
       <Modal visible={showModelsModal} transparent animationType="fade">
         <View style={s.modalOverlay}>
           <View style={s.modalCard}>
-            <Text style={s.modalTitle}>Modelos disponíveis</Text>
+            <View style={s.modalHeader}>
+              <Text style={s.modalTitle}>Modelos disponíveis</Text>
+              <TouchableOpacity onPress={() => setShowModelsModal(false)} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="close" size={22} color="#8b949e" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Filtro: Todos | Gratuitos | Pagos */}
+            <View style={s.filterRow}>
+              <TouchableOpacity
+                style={[s.filterBtn, modelFilter === 'all' && s.filterBtnActive]}
+                onPress={() => setModelFilter('all')}>
+                <Text style={[s.filterBtnText, modelFilter === 'all' && s.filterBtnTextActive]}>
+                  Todos ({availableModels.length})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.filterBtn, modelFilter === 'free' && s.filterBtnFreeActive]}
+                onPress={() => setModelFilter('free')}>
+                <Icon name="volunteer-activism" size={14} color={modelFilter === 'free' ? '#fff' : '#3fb950'} />
+                <Text style={[s.filterBtnText, modelFilter === 'free' && s.filterBtnTextActive]}>
+                  Grátis ({freeCount})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.filterBtn, modelFilter === 'paid' && s.filterBtnPaidActive]}
+                onPress={() => setModelFilter('paid')}>
+                <Icon name="paid" size={14} color={modelFilter === 'paid' ? '#fff' : '#d29922'} />
+                <Text style={[s.filterBtnText, modelFilter === 'paid' && s.filterBtnTextActive]}>
+                  Pagos ({paidCount})
+                </Text>
+              </TouchableOpacity>
+            </View>
+
             <FlatList
-              data={availableModels}
+              data={filteredModels}
               keyExtractor={(item, idx) => `${item}-${idx}`}
               renderItem={({item}) => (
                 <TouchableOpacity
                   style={s.modelItem}
                   onPress={() => pickModel(item)}>
-                  <Icon name="memory" size={20} color="#58a6ff" />
+                  <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : '#58a6ff'} />
                   <Text style={s.modelItemText} numberOfLines={1}>
                     {shortModelName(item)}
                   </Text>
+                  {isFreeModel(item) && (
+                    <View style={s.freeBadge}>
+                      <Text style={s.freeBadgeText}>FREE</Text>
+                    </View>
+                  )}
                   {item === draft.llm.model && (
                     <Icon name="check" size={20} color="#3fb950" />
                   )}
                 </TouchableOpacity>
               )}
+              ListEmptyComponent={
+                <Text style={s.emptyText}>
+                  {modelFilter === 'free' ? 'Nenhum modelo gratuito encontrado.' : 'Nenhum modelo pago encontrado.'}
+                </Text>
+              }
               style={{maxHeight: 320}}
             />
             <TouchableOpacity
@@ -409,6 +694,58 @@ const s = StyleSheet.create({
   tabText: {color: '#8b949e', fontWeight: '600', fontSize: 14},
   tabTextActive: {color: '#fff'},
   label: {fontSize: 13, color: '#8b949e', marginBottom: 6, marginTop: 14},
+  /* Dropdown de servidor */
+  dropdownBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#0d1117',
+    borderRadius: 10,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#21262d',
+  },
+  dropdownBtnText: {
+    flex: 1,
+    color: '#e6edf3',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  dropdownList: {
+    marginTop: 4,
+    backgroundColor: '#0d1117',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#21262d',
+    overflow: 'hidden',
+  },
+  dropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: '#161b22',
+  },
+  dropdownItemActive: {
+    backgroundColor: '#161b22',
+  },
+  dropdownItemText: {
+    flex: 1,
+    color: '#e6edf3',
+    fontSize: 14,
+  },
+  dropdownItemTextActive: {
+    color: '#58a6ff',
+    fontWeight: '600',
+  },
+  urlDisplay: {
+    fontSize: 11,
+    color: '#6e7681',
+    marginTop: 6,
+    fontFamily: 'monospace',
+  },
   input: {
     backgroundColor: '#0d1117',
     color: '#e6edf3',
@@ -420,6 +757,34 @@ const s = StyleSheet.create({
   },
   textarea: {minHeight: 96, textAlignVertical: 'top'},
   hint: {fontSize: 12, color: '#8b949e', marginTop: 6},
+  /* Toast — balão temporizado no topo */
+  toastWrap: {
+    position: 'absolute',
+    top: 60,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 100,
+  },
+  toast: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#238636',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 2},
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  toastText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
   modelRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -473,6 +838,67 @@ const s = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 12,
+    flex: 1,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: 12,
+    flexWrap: 'wrap',
+  },
+  filterBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#0d1117',
+    borderWidth: 1,
+    borderColor: '#21262d',
+  },
+  filterBtnActive: {
+    backgroundColor: '#1f6feb',
+    borderColor: '#1f6feb',
+  },
+  filterBtnFreeActive: {
+    backgroundColor: '#238636',
+    borderColor: '#238636',
+  },
+  filterBtnPaidActive: {
+    backgroundColor: '#9e6a03',
+    borderColor: '#9e6a03',
+  },
+  filterBtnText: {
+    color: '#8b949e',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterBtnTextActive: {
+    color: '#fff',
+  },
+  freeBadge: {
+    backgroundColor: '#238636',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  freeBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  emptyText: {
+    color: '#8b949e',
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 24,
   },
   modelItem: {
     flexDirection: 'row',
