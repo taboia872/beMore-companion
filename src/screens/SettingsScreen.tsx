@@ -17,7 +17,7 @@ import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettings, LlmProvider} from '../types';
 import {saveSettings, loadApiKeyForServer, saveApiKeyForServer} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
-import {isVisionModel} from '../utils/modelVision';
+import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 
 /**
  * Nome do ícone do checkbox de streaming conforme estado ligado/desligado.
@@ -90,9 +90,11 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
   const [fetchingModels, setFetchingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  // Quando true, o modal de modelos está selecionando modelo STT (não LLM).
+  const [sttPickerMode, setSttPickerMode] = useState(false);
   const [showModelsModal, setShowModelsModal] = useState(false);
-  // Filtro de modelos no modal: 'all' | 'free' | 'paid' | 'vision'
-  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'paid' | 'vision'>('all');
+  // Filtro de modelos no modal: 'all' | 'free' | 'stt' | 'tts'
+  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'stt' | 'tts'>('all');
 
   // Dropdown de servidor: qual preset está selecionado, ou CUSTOM_SERVER.
   // Derivado da URL atual — se a URL match um preset, seleciona ele; senão, custom.
@@ -198,6 +200,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     }
     setFetchingModels(true);
     setModelFilter('all'); // reset filtro ao buscar novos modelos
+    setSttPickerMode(false); // busca de modelos LLM, não STT
     try {
       const baseUrl = draft.llm.baseUrl.replace(/\/+$/, '');
 
@@ -249,8 +252,13 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   };
 
   const pickModel = (id: string) => {
-    updateLlm({model: id});
+    if (sttPickerMode) {
+      setDraft({...draft, sttOnlineModel: id});
+    } else {
+      updateLlm({model: id});
+    }
     setShowModelsModal(false);
+    setSttPickerMode(false);
   };
 
   /**
@@ -277,18 +285,26 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   };
 
   // Modelos filtrados conforme seleção do filtro no modal
+  const hasCapability = (id: string, cap: ModelCapability): boolean => {
+    return getModelBadges(id).some(b => b.type === cap);
+  };
+
   const filteredModels = availableModels.filter(id => {
-    if (modelFilter === 'all') return true;
+    if (modelFilter === 'all') {
+      // No modo STT picker, "Todos" mostra só modelos STT (pré-filtro)
+      if (sttPickerMode) return hasCapability(id, 'stt');
+      return true;
+    }
     if (modelFilter === 'free') return isFreeModel(id);
-    if (modelFilter === 'vision') return isVisionModel(id);
-    // 'paid' = tudo que não é free
-    return !isFreeModel(id);
+    if (modelFilter === 'stt') return hasCapability(id, 'stt');
+    if (modelFilter === 'tts') return hasCapability(id, 'tts');
+    return true;
   });
 
-  // Conta quantos grátis, pagos, e com visão existem para exibir nos botões
+  // Conta quantos grátis, STT, e TTS existem para exibir nos botões
   const freeCount = availableModels.filter(isFreeModel).length;
-  const paidCount = availableModels.length - freeCount;
-  const visionCount = availableModels.filter(isVisionModel).length;
+  const sttCount = availableModels.filter(id => hasCapability(id, 'stt')).length;
+  const ttsCount = availableModels.filter(id => hasCapability(id, 'tts')).length;
 
   return (
     <View style={s.overlay}>
@@ -519,21 +535,168 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           )}
         </Card>
 
-        {/* Card: Voz (STT) — item 6 container próprio */}
-        <Card title="Voz (STT — Whisper)" icon="mic">
-          <Text style={s.hint}>
-            Caminho do modelo Whisper para transcrição de voz on-device. Deixe vazio
-            para desativar. Ex: ggml-tiny.bin (~75 MB).
-          </Text>
-          <TextInput
-            style={s.input}
-            value={draft.sttModelPath ?? ''}
-            placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
-            placeholderTextColor="#aab2bc"
-            autoCapitalize="none"
-            autoCorrect={false}
-            onChangeText={v => setDraft({...draft, sttModelPath: v})}
-          />
+        {/* Card: Voz (STT) — toggle on-device/online */}
+        <Card title="Voz (STT)" icon="mic">
+          {/* Toggle: On-device ↔ Online */}
+          <View style={s.row}>
+            <TouchableOpacity
+              style={[s.tab, (draft.sttMode ?? 'on-device') === 'on-device' && s.tabActive]}
+              onPress={() => setDraft({...draft, sttMode: 'on-device'})}>
+              <Icon
+                name="smartphone"
+                size={18}
+                color={(draft.sttMode ?? 'on-device') === 'on-device' ? '#fff' : '#8b949e'}
+              />
+              <Text
+                style={[
+                  s.tabText,
+                  (draft.sttMode ?? 'on-device') === 'on-device' && s.tabTextActive,
+                ]}>
+                On-device
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.tab, draft.sttMode === 'online' && s.tabActive]}
+              onPress={() => setDraft({...draft, sttMode: 'online'})}>
+              <Icon
+                name="cloud-queue"
+                size={18}
+                color={draft.sttMode === 'online' ? '#fff' : '#8b949e'}
+              />
+              <Text
+                style={[
+                  s.tabText,
+                  draft.sttMode === 'online' && s.tabTextActive,
+                ]}>
+                Online
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {(draft.sttMode ?? 'on-device') === 'on-device' ? (
+            <>
+              <Text style={s.hint}>
+                Modelo Whisper GGUF no dispositivo. Deixe vazio para desativar.
+                Ex: ggml-tiny.bin (~75 MB).
+              </Text>
+              <Text style={s.label}>Caminho do modelo</Text>
+              <TextInput
+                style={s.input}
+                value={draft.sttModelPath ?? ''}
+                placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
+                placeholderTextColor="#aab2bc"
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={v => setDraft({...draft, sttModelPath: v})}
+              />
+            </>
+          ) : (
+            <>
+              <Text style={s.hint}>
+                Transcrição via API online (Groq, OpenAI, etc). Usa o modelo
+                selecionado abaixo com o servidor atual{draft.sttServerOverride?.trim() ? ' (override)' : ''}.
+              </Text>
+              <Text style={s.label}>Modelo STT online</Text>
+              <View style={s.modelRow}>
+                <TextInput
+                  style={[s.input, s.modelInput]}
+                  value={draft.sttOnlineModel ?? ''}
+                  placeholder="whisper-large-v3, whisper-large-v3-turbo, etc"
+                  placeholderTextColor="#aab2bc"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={v => setDraft({...draft, sttOnlineModel: v})}
+                />
+                <TouchableOpacity
+                  style={s.fetchBtn}
+                  onPress={async () => {
+                    // Usa o mesmo fetch de modelos do servidor LLM atual
+                    if (!draft.llm.baseUrl?.trim() && !draft.sttServerOverride?.trim()) {
+                      Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
+                      return;
+                    }
+                    setFetchingModels(true);
+                    setModelFilter('all');
+                    try {
+                      const baseUrl = (draft.sttServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
+                      let url: string;
+                      if (baseUrl.includes('openrouter.ai')) {
+                        url = 'https://openrouter.ai/api/v1/models';
+                      } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
+                        url = 'https://generativelanguage.googleapis.com/v1beta/models';
+                      } else if (baseUrl.includes('huggingface.co')) {
+                        url = 'https://huggingface.co/api/models?inference=warm&limit=100';
+                      } else {
+                        url = `${baseUrl}/models`;
+                      }
+                      const apiKey = draft.sttServerOverride?.trim()
+                        ? await loadApiKeyForServer(draft.sttServerOverride.trim())
+                        : draft.llm.apiKey ?? '';
+                      const response = await fetch(url, {
+                        method: 'GET',
+                        headers: {
+                          ...(apiKey && {Authorization: `Bearer ${apiKey}`}),
+                        },
+                      });
+                      if (!response.ok) {
+                        const errText = await response.text();
+                        throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+                      }
+                      const data = await response.json();
+                      const models: RemoteModel[] = data?.data ?? data?.models ?? [];
+                      const ids = models
+                        .map(m => m.id)
+                        .filter((id): id is string => typeof id === 'string');
+                      if (ids.length === 0) {
+                        Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
+                        return;
+                      }
+                      ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+                      // Pré-filtra STT para focar em modelos de transcrição
+                      setAvailableModels(ids);
+                      setSttPickerMode(true);
+                      setShowModelsModal(true);
+                    } catch (e) {
+                      Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
+                    } finally {
+                      setFetchingModels(false);
+                    }
+                  }}
+                  disabled={fetchingModels}>
+                  {fetchingModels ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <Icon name="search" size={20} color="#fff" />
+                  )}
+                </TouchableOpacity>
+              </View>
+              {draft.sttOnlineModel?.trim() && (
+                <View style={s.sttModelSelected}>
+                  <Icon name="check-circle" size={14} color="#f0883e" />
+                  <Text style={s.sttModelSelectedText}>
+                    {draft.sttOnlineModel}
+                  </Text>
+                </View>
+              )}
+
+              {/* Override de servidor STT (opcional) */}
+              <Text style={s.label}>Servidor STT (opcional)</Text>
+              <TextInput
+                style={s.input}
+                value={draft.sttServerOverride ?? ''}
+                placeholder="Deixe vazio para usar o mesmo do chat"
+                placeholderTextColor="#aab2bc"
+                autoCapitalize="none"
+                autoCorrect={false}
+                onChangeText={v => setDraft({...draft, sttServerOverride: v})}
+              />
+              <Text style={s.hint}>
+                Por padrão usa a URL+API Key do servidor de chat. Preencha
+                para usar um servidor diferente só para STT (ex: Groq mesmo
+                que o chat use outro).
+              </Text>
+            </>
+          )}
         </Card>
 
         {/* Card: Prompt do Sistema — item 6 container próprio */}
@@ -586,13 +749,15 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         <View style={s.modalOverlay}>
           <View style={s.modalCard}>
             <View style={s.modalHeader}>
-              <Text style={s.modalTitle}>Modelos disponíveis</Text>
+              <Text style={s.modalTitle}>
+                {sttPickerMode ? 'Modelos STT disponíveis' : 'Modelos disponíveis'}
+              </Text>
               <TouchableOpacity onPress={() => setShowModelsModal(false)} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
                 <Icon name="close" size={22} color="#8b949e" />
               </TouchableOpacity>
             </View>
 
-            {/* Filtro: Todos | Gratuitos | Visão | Pagos */}
+            {/* Filtro: Todos | Gratuitos | STT | TTS */}
             <View style={s.filterRow}>
               <TouchableOpacity
                 style={[s.filterBtn, modelFilter === 'all' && s.filterBtnActive]}
@@ -610,19 +775,19 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'vision' && s.filterBtnVisionActive]}
-                onPress={() => setModelFilter('vision')}>
-                <Icon name="visibility" size={14} color={modelFilter === 'vision' ? '#fff' : '#a371f7'} />
-                <Text style={[s.filterBtnText, modelFilter === 'vision' && s.filterBtnTextActive]}>
-                  Visão ({visionCount})
+                style={[s.filterBtn, modelFilter === 'stt' && s.filterBtnSttActive]}
+                onPress={() => setModelFilter('stt')}>
+                <Icon name="mic" size={14} color={modelFilter === 'stt' ? '#fff' : '#f0883e'} />
+                <Text style={[s.filterBtnText, modelFilter === 'stt' && s.filterBtnTextActive]}>
+                  STT ({sttCount})
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'paid' && s.filterBtnPaidActive]}
-                onPress={() => setModelFilter('paid')}>
-                <Icon name="paid" size={14} color={modelFilter === 'paid' ? '#fff' : '#d29922'} />
-                <Text style={[s.filterBtnText, modelFilter === 'paid' && s.filterBtnTextActive]}>
-                  Pagos ({paidCount})
+                style={[s.filterBtn, modelFilter === 'tts' && s.filterBtnTtsActive]}
+                onPress={() => setModelFilter('tts')}>
+                <Icon name="volume-up" size={14} color={modelFilter === 'tts' ? '#fff' : '#2dd4bf'} />
+                <Text style={[s.filterBtnText, modelFilter === 'tts' && s.filterBtnTextActive]}>
+                  TTS ({ttsCount})
                 </Text>
               </TouchableOpacity>
             </View>
@@ -630,33 +795,69 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             <FlatList
               data={filteredModels}
               keyExtractor={(item, idx) => `${item}-${idx}`}
-              renderItem={({item}) => (
-                <TouchableOpacity
-                  style={s.modelItem}
-                  onPress={() => pickModel(item)}>
-                  <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : '#58a6ff'} />
-                  <Text style={s.modelItemText} numberOfLines={1}>
-                    {shortModelName(item)}
-                  </Text>
-                  {isVisionModel(item) && (
-                    <View style={s.visionBadge}>
-                      <Icon name="visibility" size={10} color="#a371f7" />
-                      <Text style={s.visionBadgeText}>VISÃO</Text>
-                    </View>
-                  )}
-                  {isFreeModel(item) && (
-                    <View style={s.freeBadge}>
-                      <Text style={s.freeBadgeText}>FREE</Text>
-                    </View>
-                  )}
-                  {item === draft.llm.model && (
-                    <Icon name="check" size={20} color="#3fb950" />
-                  )}
-                </TouchableOpacity>
-              )}
+              renderItem={({item}) => {
+                const badges = getModelBadges(item);
+                return (
+                  <TouchableOpacity
+                    style={s.modelItem}
+                    onPress={() => pickModel(item)}>
+                    <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : '#58a6ff'} />
+                    <Text style={s.modelItemText} numberOfLines={1}>
+                      {shortModelName(item)}
+                    </Text>
+                    {badges.map(badge => {
+                      if (badge.type === 'vision') {
+                        return (
+                          <View key="vision" style={s.visionBadge}>
+                            <Icon name="visibility" size={10} color="#a371f7" />
+                            <Text style={s.visionBadgeText}>VISÃO</Text>
+                          </View>
+                        );
+                      }
+                      if (badge.type === 'stt') {
+                        return (
+                          <View key="stt" style={s.sttBadge}>
+                            <Icon name="mic" size={10} color="#f0883e" />
+                            <Text style={s.sttBadgeText}>STT</Text>
+                          </View>
+                        );
+                      }
+                      if (badge.type === 'tts') {
+                        return (
+                          <View key="tts" style={s.ttsBadge}>
+                            <Icon name="volume-up" size={10} color="#2dd4bf" />
+                            <Text style={s.ttsBadgeText}>TTS</Text>
+                          </View>
+                        );
+                      }
+                      // anyToAny
+                      return (
+                        <View key="any" style={s.anyBadge}>
+                          <Icon name="all-inclusive" size={10} color="#d2a8ff" />
+                          <Text style={s.anyBadgeText}>ANY→ANY</Text>
+                        </View>
+                      );
+                    })}
+                    {isFreeModel(item) && (
+                      <View style={s.freeBadge}>
+                        <Text style={s.freeBadgeText}>FREE</Text>
+                      </View>
+                    )}
+                    {item === (sttPickerMode ? draft.sttOnlineModel : draft.llm.model) && (
+                      <Icon name="check" size={20} color="#3fb950" />
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
               ListEmptyComponent={
                 <Text style={s.emptyText}>
-                  {modelFilter === 'free' ? 'Nenhum modelo gratuito encontrado.' : modelFilter === 'vision' ? 'Nenhum modelo com visão encontrado.' : 'Nenhum modelo pago encontrado.'}
+                  {modelFilter === 'free'
+                    ? 'Nenhum modelo gratuito encontrado.'
+                    : modelFilter === 'stt'
+                    ? 'Nenhum modelo STT encontrado.'
+                    : modelFilter === 'tts'
+                    ? 'Nenhum modelo TTS encontrado.'
+                    : 'Nenhum modelo encontrado.'}
                 </Text>
               }
               style={{maxHeight: 320}}
@@ -918,13 +1119,13 @@ const s = StyleSheet.create({
     backgroundColor: '#238636',
     borderColor: '#238636',
   },
-  filterBtnPaidActive: {
-    backgroundColor: '#9e6a03',
-    borderColor: '#9e6a03',
+  filterBtnSttActive: {
+    backgroundColor: '#bc4c00',
+    borderColor: '#bc4c00',
   },
-  filterBtnVisionActive: {
-    backgroundColor: '#6e40c9',
-    borderColor: '#6e40c9',
+  filterBtnTtsActive: {
+    backgroundColor: '#0d9488',
+    borderColor: '#0d9488',
   },
   filterBtnText: {
     color: '#8b949e',
@@ -961,6 +1162,54 @@ const s = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
   },
+  sttBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3d1f00',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 3,
+    borderWidth: 1,
+    borderColor: '#bc4c00',
+  },
+  sttBadgeText: {
+    color: '#f0883e',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  ttsBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#042f2e',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 3,
+    borderWidth: 1,
+    borderColor: '#0d9488',
+  },
+  ttsBadgeText: {
+    color: '#2dd4bf',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  anyBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2d1b69',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 3,
+    borderWidth: 1,
+    borderColor: '#8957e5',
+  },
+  anyBadgeText: {
+    color: '#d2a8ff',
+    fontSize: 9,
+    fontWeight: '700',
+  },
   emptyText: {
     color: '#8b949e',
     fontSize: 14,
@@ -989,5 +1238,23 @@ const s = StyleSheet.create({
     color: '#58a6ff',
     fontWeight: '600',
     fontSize: 15,
+  },
+  sttModelSelected: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: '#3d1f00',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#bc4c00',
+  },
+  sttModelSelectedText: {
+    color: '#f0883e',
+    fontSize: 13,
+    fontWeight: '600',
+    flex: 1,
   },
 });

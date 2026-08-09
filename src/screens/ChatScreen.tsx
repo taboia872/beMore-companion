@@ -398,12 +398,19 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   };
 
   const toggleMic = async () => {
+    const sttMode = settings.sttMode ?? 'on-device';
+    const sttReady =
+      sttMode === 'online'
+        ? !!settings.sttOnlineModel?.trim() &&
+          (!!settings.llm.baseUrl?.trim() || !!settings.sttServerOverride?.trim())
+        : !!settings.sttModelPath?.trim();
+
     if (recorder.status === 'idle' || recorder.status === 'error') {
-      if (!settings.sttModelPath?.trim()) {
-        Alert.alert(
-          'STT não configurado',
-          'Para usar o microfone, defina o caminho do modelo Whisper em Settings.',
-        );
+      if (!sttReady) {
+        const msg = sttMode === 'online'
+          ? 'Para usar o microfone, selecione um modelo STT online nas configurações.'
+          : 'Para usar o microfone, defina o caminho do modelo Whisper em Settings.';
+        Alert.alert('STT não configurado', msg);
         return;
       }
       const ok = await ensureAudioPermission();
@@ -428,14 +435,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       try {
         const path = await recorder.stop();
         if (!path) return;
-        if (!settings.sttModelPath?.trim()) {
-          Alert.alert(
-            'STT não configurado',
-            'Defina o caminho do modelo Whisper em Settings para transcrever voz.',
-          );
+        if (!sttReady) {
+          const msg = sttMode === 'online'
+            ? 'Selecione um modelo STT online nas configurações para transcrever voz.'
+            : 'Defina o caminho do modelo Whisper em Settings para transcrever voz.';
+          Alert.alert('STT não configurado', msg);
           return;
         }
-        const transcript = await whisper.transcribe(path, settings.sttModelPath);
+        const transcript = await whisper.transcribe(path, settings);
         if (transcript && transcript.trim()) {
           setInput(transcript.trim());
         } else if (whisper.errorMessage) {

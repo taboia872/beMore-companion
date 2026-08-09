@@ -44,7 +44,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     apiKey: '',
     model: 'llama3',
   },
+  sttMode: 'on-device',
   sttModelPath: '',
+  sttOnlineModel: '',
+  sttServerOverride: '',
   streamingEnabled: true,
 };
 

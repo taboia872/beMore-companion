@@ -66,10 +66,27 @@ export interface AppSettings {
   systemPrompt: string;
   llm: LlmConfig;
   /**
+   * Modo de transcrição de voz (STT):
+   * - 'on-device': usa whisper.rn com modelo GGUF local (sttModelPath)
+   * - 'online':    usa API de transcrição (Groq/OpenAI-compatível)
+   */
+  sttMode?: 'on-device' | 'online';
+  /**
    * Caminho no device para o modelo Whisper GGUF (STT on-device).
-   * Se vazio, transcrição de voz fica indisponível.
+   * Se vazio, transcrição on-device fica indisponível.
    */
   sttModelPath?: string;
+  /**
+   * Nome do modelo para STT online (ex: 'whisper-large-v3', 'whisper-large-v3-turbo').
+   * Usado quando sttMode === 'online'. Se vazio, STT online fica indisponível.
+   */
+  sttOnlineModel?: string;
+  /**
+   * Override opcional de servidor para STT online.
+   * Se vazio, reutiliza baseUrl+apiKey do servidor LLM atual.
+   * Se preenchido, usa esta URL (com apiKey do Keychain para este hostname).
+   */
+  sttServerOverride?: string;
   /**
    * Habilita/desabilita o streaming de respostas da IA. Quando true (padrão),
    * tokens aparecem em tempo real conforme chegam (via SSE). Quando false, a
