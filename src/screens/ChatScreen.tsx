@@ -17,6 +17,8 @@ import {
   Image as RNImage,
   ActionSheetIOS,
   ScrollView,
+  Modal,
+  Dimensions,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
@@ -78,6 +80,10 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   // Imagens pendentes anexadas pelo usuário (preview antes de enviar).
   // Cada item tem {uri, base64} — base64 é o data URI enviado na API.
   const [pendingImages, setPendingImages] = useState<Array<{uri: string; base64: string; mime: string}>>([]);
+  // URL da imagem exibida no modal de expansão (full-screen). null = fechado.
+  const [imageModalUrl, setImageModalUrl] = useState<string | null>(null);
+  // Controla o bottom sheet visual para escolher origem da imagem (Android).
+  const [showPickerSheet, setShowPickerSheet] = useState(false);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -224,33 +230,26 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   };
 
   // --- Anexar imagem (câmera ou galeria) ---
-  // ActionSheet no iOS, Alert com botões no Android (mesma UX).
+  // ActionSheet no iOS (nativo), bottom sheet customizado no Android
+  // (Modal com cards visuais — mais bonito que Alert.alert com 3 botões).
   const showImagePicker = () => {
-    const options = ['Tirar foto', 'Escolher da galeria', 'Cancelar'];
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        title: 'Anexar imagem',
-        options,
-        cancelButtonIndex: 2,
-      },
-      (idx) => {
-        if (idx === 0) pickFromCamera();
-        else if (idx === 1) pickFromGallery();
-      },
-    );
-  };
-
-  // Fallback Android (ActionSheetIOS é iOS-only). Usamos Alert com botões.
-  const showImagePickerAndroid = () => {
-    Alert.alert(
-      'Anexar imagem',
-      'Escolha a origem',
-      [
-        {text: 'Tirar foto', onPress: () => pickFromCamera()},
-        {text: 'Escolher da galeria', onPress: () => pickFromGallery()},
-        {text: 'Cancelar', style: 'cancel'},
-      ],
-    );
+    if (Platform.OS === 'ios') {
+      const options = ['Tirar foto', 'Escolher da galeria', 'Cancelar'];
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: 'Anexar imagem',
+          options,
+          cancelButtonIndex: 2,
+        },
+        (idx) => {
+          if (idx === 0) pickFromCamera();
+          else if (idx === 1) pickFromGallery();
+        },
+      );
+    } else {
+      // Android: bottom sheet visual via Modal (substitui Alert.alert).
+      setShowPickerSheet(true);
+    }
   };
 
   const pickFromCamera = async () => {
@@ -519,16 +518,21 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         {/* conteúdo principal */}
         {(getTextContent(item) || !isStreamingMsg || hasImages(item)) && (
           <>
-            {/* Imagens anexadas (multimodal) — exibidas acima do texto */}
+            {/* Imagens anexadas (multimodal) — exibidas acima do texto.
+                Cada imagem é clicável: abre modal de expansão full-screen. */}
             {hasImages(item) && (
               <View style={s.imageRow}>
                 {getImageUrls(item).map((url, imgIdx) => (
-                  <RNImage
+                  <TouchableOpacity
                     key={imgIdx}
-                    source={{uri: url}}
-                    style={s.chatImage}
-                    resizeMode="cover"
-                  />
+                    activeOpacity={0.85}
+                    onPress={() => setImageModalUrl(url)}>
+                    <RNImage
+                      source={{uri: url}}
+                      style={s.chatImage}
+                      resizeMode="cover"
+                    />
+                  </TouchableOpacity>
                 ))}
               </View>
             )}
@@ -656,7 +660,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           {/* Botão de anexar imagem (clip) — sempre disponível */}
           <TouchableOpacity
             style={s.attachBtn}
-            onPress={Platform.OS === 'ios' ? showImagePicker : showImagePickerAndroid}
+            onPress={showImagePicker}
             hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
             <Icon name="attach-file" size={22} color="#8b949e" />
           </TouchableOpacity>
@@ -692,6 +696,82 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
         {renderActionBtn()}
       </View>
+
+      {/* --- Modal de expansão de imagem (full-screen) --- */}
+      {/* Abre quando o usuário toca numa imagem do chat. Mostra a imagem
+          grande num overlay escuro, com botão X no canto superior direito. */}
+      <Modal
+        visible={imageModalUrl !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setImageModalUrl(null)}>
+        <View style={s.imageModalOverlay}>
+          <TouchableOpacity
+            style={s.imageModalCloseBtn}
+            onPress={() => setImageModalUrl(null)}
+            hitSlop={{top: 12, bottom: 12, left: 12, right: 12}}>
+            <Icon name="close" size={28} color="#fff" />
+          </TouchableOpacity>
+          {imageModalUrl && (
+            <RNImage
+              source={{uri: imageModalUrl}}
+              style={s.imageModalImage}
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
+
+      {/* --- Bottom sheet de seleção de origem da imagem (Android) --- */}
+      {/* Substitui Alert.alert por cards visuais com ícones grandes.
+          Mostra câmera, galeria e cancelar em colunas com labels. */}
+      <Modal
+        visible={showPickerSheet}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowPickerSheet(false)}>
+        <TouchableOpacity
+          style={s.pickerSheetOverlay}
+          activeOpacity={1}
+          onPress={() => setShowPickerSheet(false)}>
+          <View
+            style={s.pickerSheetCard}
+            // Impede que o tap no card feche o modal (overlay sim).
+            onStartShouldSetResponder={() => true}>
+            <View style={s.pickerSheetHandle} />
+            <Text style={s.pickerSheetTitle}>Anexar imagem</Text>
+            <View style={s.pickerSheetOptions}>
+              <TouchableOpacity
+                style={s.pickerSheetOption}
+                onPress={() => {
+                  setShowPickerSheet(false);
+                  pickFromCamera();
+                }}>
+                <View style={s.pickerSheetIconWrap}>
+                  <Icon name="photo-camera" size={32} color="#58a6ff" />
+                </View>
+                <Text style={s.pickerSheetOptionLabel}>Tirar foto</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={s.pickerSheetOption}
+                onPress={() => {
+                  setShowPickerSheet(false);
+                  pickFromGallery();
+                }}>
+                <View style={s.pickerSheetIconWrap}>
+                  <Icon name="photo-library" size={32} color="#3fb950" />
+                </View>
+                <Text style={s.pickerSheetOptionLabel}>Escolher da galeria</Text>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={s.pickerSheetCancelBtn}
+              onPress={() => setShowPickerSheet(false)}>
+              <Text style={s.pickerSheetCancelText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -980,5 +1060,97 @@ const s = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#0d1117',
+  },
+  // --- Modal de expansão de imagem (full-screen) ---
+  imageModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageModalCloseBtn: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(30,30,30,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  imageModalImage: {
+    width: Dimensions.get('window').width,
+    height: Dimensions.get('window').height * 0.75,
+  },
+  // --- Bottom sheet de seleção de origem (Android) ---
+  pickerSheetOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  pickerSheetCard: {
+    backgroundColor: '#161b22',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: 24,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    borderWidth: 1,
+    borderTopColor: '#30363d',
+  },
+  pickerSheetHandle: {
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#30363d',
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  pickerSheetTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#e6edf3',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  pickerSheetOptions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 24,
+    marginBottom: 20,
+  },
+  pickerSheetOption: {
+    alignItems: 'center',
+    width: 100,
+  },
+  pickerSheetIconWrap: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#21262d',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  pickerSheetOptionLabel: {
+    fontSize: 13,
+    color: '#8b949e',
+    textAlign: 'center',
+  },
+  pickerSheetCancelBtn: {
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: '#21262d',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#30363d',
+  },
+  pickerSheetCancelText: {
+    fontSize: 15,
+    color: '#c9d1d9',
   },
 });

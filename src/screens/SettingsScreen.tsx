@@ -17,6 +17,7 @@ import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettings, LlmProvider} from '../types';
 import {saveSettings, loadApiKeyForServer, saveApiKeyForServer} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
+import {isVisionModel} from '../utils/modelVision';
 
 /**
  * Nome do ícone do checkbox de streaming conforme estado ligado/desligado.
@@ -90,8 +91,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [showModelsModal, setShowModelsModal] = useState(false);
-  // Filtro de modelos no modal: 'all' | 'free' | 'paid'
-  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'paid'>('all');
+  // Filtro de modelos no modal: 'all' | 'free' | 'paid' | 'vision'
+  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'paid' | 'vision'>('all');
 
   // Dropdown de servidor: qual preset está selecionado, ou CUSTOM_SERVER.
   // Derivado da URL atual — se a URL match um preset, seleciona ele; senão, custom.
@@ -279,13 +280,15 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   const filteredModels = availableModels.filter(id => {
     if (modelFilter === 'all') return true;
     if (modelFilter === 'free') return isFreeModel(id);
+    if (modelFilter === 'vision') return isVisionModel(id);
     // 'paid' = tudo que não é free
     return !isFreeModel(id);
   });
 
-  // Conta quantos grátis e pagos existem para exibir nos botões
+  // Conta quantos grátis, pagos, e com visão existem para exibir nos botões
   const freeCount = availableModels.filter(isFreeModel).length;
   const paidCount = availableModels.length - freeCount;
+  const visionCount = availableModels.filter(isVisionModel).length;
 
   return (
     <View style={s.overlay}>
@@ -589,7 +592,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               </TouchableOpacity>
             </View>
 
-            {/* Filtro: Todos | Gratuitos | Pagos */}
+            {/* Filtro: Todos | Gratuitos | Visão | Pagos */}
             <View style={s.filterRow}>
               <TouchableOpacity
                 style={[s.filterBtn, modelFilter === 'all' && s.filterBtnActive]}
@@ -604,6 +607,14 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 <Icon name="volunteer-activism" size={14} color={modelFilter === 'free' ? '#fff' : '#3fb950'} />
                 <Text style={[s.filterBtnText, modelFilter === 'free' && s.filterBtnTextActive]}>
                   Grátis ({freeCount})
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.filterBtn, modelFilter === 'vision' && s.filterBtnVisionActive]}
+                onPress={() => setModelFilter('vision')}>
+                <Icon name="visibility" size={14} color={modelFilter === 'vision' ? '#fff' : '#a371f7'} />
+                <Text style={[s.filterBtnText, modelFilter === 'vision' && s.filterBtnTextActive]}>
+                  Visão ({visionCount})
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -627,6 +638,12 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   <Text style={s.modelItemText} numberOfLines={1}>
                     {shortModelName(item)}
                   </Text>
+                  {isVisionModel(item) && (
+                    <View style={s.visionBadge}>
+                      <Icon name="visibility" size={10} color="#a371f7" />
+                      <Text style={s.visionBadgeText}>VISÃO</Text>
+                    </View>
+                  )}
                   {isFreeModel(item) && (
                     <View style={s.freeBadge}>
                       <Text style={s.freeBadgeText}>FREE</Text>
@@ -639,7 +656,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               )}
               ListEmptyComponent={
                 <Text style={s.emptyText}>
-                  {modelFilter === 'free' ? 'Nenhum modelo gratuito encontrado.' : 'Nenhum modelo pago encontrado.'}
+                  {modelFilter === 'free' ? 'Nenhum modelo gratuito encontrado.' : modelFilter === 'vision' ? 'Nenhum modelo com visão encontrado.' : 'Nenhum modelo pago encontrado.'}
                 </Text>
               }
               style={{maxHeight: 320}}
@@ -905,6 +922,10 @@ const s = StyleSheet.create({
     backgroundColor: '#9e6a03',
     borderColor: '#9e6a03',
   },
+  filterBtnVisionActive: {
+    backgroundColor: '#6e40c9',
+    borderColor: '#6e40c9',
+  },
   filterBtnText: {
     color: '#8b949e',
     fontSize: 12,
@@ -921,6 +942,22 @@ const s = StyleSheet.create({
   },
   freeBadgeText: {
     color: '#fff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  visionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2d1b69',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 3,
+    borderWidth: 1,
+    borderColor: '#6e40c9',
+  },
+  visionBadgeText: {
+    color: '#d2a8ff',
     fontSize: 10,
     fontWeight: '700',
   },
