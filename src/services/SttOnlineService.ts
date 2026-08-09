@@ -2,13 +2,12 @@
  * SttOnlineService — transcrição de áudio via API online (Groq, OpenAI, etc).
  *
  * Usa o endpoint OpenAI-compatível POST /audio/transcriptions com
- * multipart/form-data (file + model). Funciona com:
- *   - Groq: https://api.groq.com/openai/v1/audio/transcriptions
- *   - OpenAI: https://api.openai.com/v1/audio/transcriptions
- *   - Qualquer servidor que implemente o endpoint compatível
+ * multipart/form-data (file + model).
  *
  * No React Native, FormData com {uri, type, name} é processado nativamente
- * como multipart/form-data pelo fetch — não precisa de biblioteca extra.
+ * como multipart/form-data pelo fetch. O caminho do arquivo deve ser o
+ * path absoluto do sistema de arquivos (sem prefixo file:// no Android
+ * quando já é um path absoluto /data/data/...).
  */
 
 import {Platform} from 'react-native';
@@ -26,13 +25,8 @@ export interface SttOnlineParams {
   language?: string;
 }
 
-export interface SttOnlineResult {
-  text: string;
-}
-
 /**
  * Verifica se o STT online está disponível (qualquer plataforma com fetch).
- * No Android, o fetch com FormData+uri é suportado nativamente pelo RN.
  */
 export function isSttOnlineAvailable(): boolean {
   return typeof fetch === 'function';
@@ -40,7 +34,6 @@ export function isSttOnlineAvailable(): boolean {
 
 /**
  * Constrói a URL completa do endpoint de transcrição.
- * Aceita baseUrl com ou sem trailing slash.
  */
 function buildTranscriptionUrl(baseUrl: string): string {
   const clean = baseUrl.trim().replace(/\/+$/, '');
@@ -49,6 +42,10 @@ function buildTranscriptionUrl(baseUrl: string): string {
 
 /**
  * Transcreve um arquivo de áudio via API online (Groq/OpenAI-compatível).
+ *
+ * Usa FormData com {uri, type, name} — o React Native processa isso
+ * nativamente como multipart/form-data no fetch. No Android, o uri deve
+ * ser o path absoluto sem prefixo file:// quando já começa com /.
  *
  * @returns o texto transcrito, ou string vazia se nada foi reconhecido
  * @throws Error com mensagem amigável em PT-BR
@@ -70,10 +67,13 @@ export async function transcribeAudioOnline(
 
   const url = buildTranscriptionUrl(baseUrl);
 
-  // FormData no React Native: {uri, name, type} → multipart nativo
+  // No Android, caminhos absolutos (/data/data/...) funcionam diretamente
+  // como uri no FormData sem prefixo file://. No iOS, precisaria file://.
+  const fileUri = Platform.OS === 'android' ? filePath : `file://${filePath}`;
+
   const formData = new FormData();
   formData.append('file', {
-    uri: Platform.OS === 'android' ? `file://${filePath}` : filePath,
+    uri: fileUri,
     type: 'audio/wav',
     name: 'recording.wav',
   } as any);
@@ -81,7 +81,6 @@ export async function transcribeAudioOnline(
   if (language) {
     formData.append('language', language);
   }
-  // response_format: json (default) — retorna {"text": "..."}
   formData.append('response_format', 'json');
 
   const headers: Record<string, string> = {};
@@ -110,7 +109,6 @@ export async function transcribeAudioOnline(
     let errDetail = '';
     try {
       const errBody = await response.text();
-      // Tenta extrator mensagem de erro do JSON
       try {
         const errJson = JSON.parse(errBody);
         errDetail = errJson?.error?.message ?? errJson?.message ?? errBody.slice(0, 200);
@@ -136,7 +134,6 @@ export async function transcribeAudioOnline(
     throw new Error(`Erro ${response.status}: ${errDetail}`);
   }
 
-  // Resposta: {"text": "transcrição..."}
   const data = await response.json();
   const text: string = data?.text ?? '';
   return text.trim();
