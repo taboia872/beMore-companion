@@ -34,6 +34,11 @@ const VISION_PATTERNS: string[] = [
   'qwen2vl',
   'qwen-vl',
   'qvq', // Qwen-VL reasoning
+  // --- Qwen 3.x multimodal — Qwen3.6-27B é confirmadamente vision no Groq ---
+  // Groq model id: qwen/qwen3.6-27b. Qwen3.6 dense (27B) é multimodal nativo;
+  // outros Qwen3.x podem não ser, mas o filtro "Visão" é opt-in: melhor pecar
+  // por otimismo (falso-positivo aceitável — usuário descobre rapidamente).
+  'qwen3.6',
   // --- InternVL / DeepSeek VL ---
   'internvl',
   'intern-vl',

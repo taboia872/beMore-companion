@@ -260,15 +260,36 @@ export function streamResponse(
   streamingEnabled = true,
   thinkingEnabled = false,
 ): Promise<void> {
-  if (config.provider === 'localhost') {
-    // Quando thinking está DESLIGADO, suprimimos o pensamento: o tag parser
-    // ainda captura as tags  do content, mas os eventos de 'thinking'
-    // são descartados pelo wrapper — o usuário não vê o bloco de pensamento
-    // nem recebe as tags como texto. O conteúdo DENTRO das tags é perdido
-    // (não vira resposta, não vira thinking) — o modelo "pensa" em silêncio.
+  // Determina se a supressão de pensamento se aplica neste modo.
+  //
+  // Regra (confirmada com o usuário, ago/2026):
+  // - provider === 'local' (on-device GGUF): o usuário tem o botão lâmpada
+  //   no input bar. Quando DESLIGADO, o pensamento é suprimido — o modelo
+  //   "pensa em silêncio" (o conteúdo das tags  é descartado, não vira
+  //   texto visível nem bloco de pensamento).
+  // - provider === 'localhost' (qualquer servidor online: Groq, OpenRouter,
+  //   NVIDIA, Gemini, etc): o botão de pensamento é ESCONDIDO da UI (só
+  //   aparece no modo local). Não faz sentido suprimir o que o usuário
+  //   não pode controlar — o modelo pensa livremente e o usuário VÊ o
+  //   bloco de pensamento.
+  //
+  // Bug histórico (introduzido em 67b4d9d "thinking toggle suppression"):
+  // a supressão era aplicada para QUALQUER provider se thinkingEnabled=false.
+  // Como thinkingEnabled é false por default e o botão é escondido online,
+  // o pensamento do Qwen 3.6 (tags inline do Groq raw format) era silencio-
+  // samente descartado. Correção: limitar a supressão ao modo local.
+  const suppressThinking = config.provider === 'local' && !thinkingEnabled;
+
+  if (config.provider === 'localhost' || config.provider === 'local') {
+    // Quando thinking está DESLIGADO (apenas no modo local), suprimimos o
+    // pensamento: o tag parser ainda captura as tags  do content, mas os
+    // eventos de 'thinking' são descartados pelo wrapper — o usuário não
+    // vê o bloco de pensamento nem recebe as tags como texto. O conteúdo
+    // DENTRO das tags é perdido (não vira resposta, não vira thinking) —
+    // o modelo "pensa" em silêncio.
     const wrappedOnEvent: StreamCallback = (event) => {
-      if (!thinkingEnabled && event.type === 'thinking') {
-        // Modo thinking OFF: descarta o conteúdo de thinking.
+      if (suppressThinking && event.type === 'thinking') {
+        // Modo thinking OFF (apenas local): descarta o conteúdo de thinking.
         return;
       }
       onEvent(event);
