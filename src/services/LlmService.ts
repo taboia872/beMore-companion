@@ -494,7 +494,11 @@ function streamNetwork(
     const parser = createThinkingParser(onEvent);
 
     const xhr = new XMLHttpRequest();
-    xhr.timeout = 60000; // 60s sem resposta = timeout
+    // Timeout total da requisição. 60s era insuficiente para modelos de
+    // raciocínio nativo (Qwen 3.6 27B, DeepSeek-R1) que passam às vezes
+    // 1-2 minutos "pensando" antes de emitir a resposta final. 300s (5min)
+    // dá folga generosa sem nunca interromper o pensamento do modelo.
+    xhr.timeout = 300000;
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
@@ -628,7 +632,7 @@ function streamNetwork(
       if (!finished) finalize('aborted');
     };
     xhr.ontimeout = () => {
-      if (!finished) finalize('error', 'Timeout: servidor não respondeu em 60s');
+      if (!finished) finalize('error', 'Timeout: servidor não respondeu em 5min');
     };
 
     ctrl = xhr;

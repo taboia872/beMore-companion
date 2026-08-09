@@ -19,6 +19,7 @@ import {
   ScrollView,
   Modal,
   Dimensions,
+  PermissionsAndroid,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
@@ -101,10 +102,17 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
   const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-  const send = async (overrideText?: string) => {
+  const send = async (
+    overrideText?: string,
+    overrideContent?: string | ContentPart[],
+  ) => {
+    // overrideContent tem prioridade sobre overrideText — usado por
+    // regenerateMessage para reanexar a mensagem multimodal original
+    // (texto + imagens) sem perder a imagem do chat.
     const text = (overrideText ?? input).trim();
-    // Pode enviar se tem texto OU imagens pendentes.
-    if ((!text && pendingImages.length === 0) || streaming) return;
+    const hasOverrideContent = overrideContent !== undefined;
+    // Pode enviar se tem texto OU imagens pendentes OU overrideContent.
+    if ((!text && pendingImages.length === 0 && !hasOverrideContent) || streaming) return;
 
     // Injeta instrução de thinking no system prompt dinamicamente quando ativo.
     // Só funciona no modo local (provider === 'local'). Quando online, o
@@ -114,8 +122,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       : settings.systemPrompt;
 
     // Constrói content: multimodal (array) se há imagens, senão string.
+    // Se overrideContent foi fornecido (regenerate), usa direto — já vem
+    // no formato correto (string OU ContentPart[] preservando imagens).
     let userContent: string | ContentPart[];
-    if (pendingImages.length > 0) {
+    if (hasOverrideContent) {
+      userContent = overrideContent!;
+    } else if (pendingImages.length > 0) {
       const parts: ContentPart[] = [];
       if (text) {
         parts.push({type: 'text', text});
@@ -252,7 +264,81 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     }
   };
 
+  // --- Permissões Android em runtime ---
+  // O AndroidManifest declara as permissões, mas a API ainda precisa
+  // solicitar ao usuário em tempo de execução (CAMERA, RECORD_AUDIO e
+  // READ_MEDIA_IMAGES/READ_EXTERNAL_STORAGE). Sem isso, launchCamera/
+  // launchImageLibrary/recorder.start falham silenciosamente quando o
+  // usuário ainda não concedeu — e ele só descobre indo nas Configs
+  // do Android. Aqui pedimos antes de chamar cada função.
+  const ensureCameraPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.CAMERA,
+        {
+          title: 'Permissão de câmera',
+          message: 'O BeMore precisa acessar a câmera para tirar fotos e anexá-las ao chat.',
+          buttonPositive: 'Permitir',
+          buttonNegative: 'Cancelar',
+        },
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch {
+      return false;
+    }
+  };
+
+  const ensureGalleryPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      // Android 13+ usa READ_MEDIA_IMAGES; Android ≤12 usa READ_EXTERNAL_STORAGE.
+      // O PermissionsAndroid.request aceita qualquer uma, mas pode falhar se a
+      // permissão não existir no manifest. Tentamos a nova primeiro; se a API
+      // rejeitar (undefined), caímos para a antiga.
+      const perm13 = PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES;
+      const granted = await PermissionsAndroid.request(
+        perm13 ?? PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE,
+        {
+          title: 'Permissão de acesso à galeria',
+          message: 'O BeMore precisa acessar suas fotos para anexá-las ao chat.',
+          buttonPositive: 'Permitir',
+          buttonNegative: 'Cancelar',
+        },
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch {
+      return false;
+    }
+  };
+
+  const ensureAudioPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    try {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        {
+          title: 'Permissão de microfone',
+          message: 'O BeMore precisa do microfone para transcrever sua voz em texto.',
+          buttonPositive: 'Permitir',
+          buttonNegative: 'Cancelar',
+        },
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch {
+      return false;
+    }
+  };
+
   const pickFromCamera = async () => {
+    const ok = await ensureCameraPermission();
+    if (!ok) {
+      Alert.alert(
+        'Permissão negada',
+        'Para tirar foto, libere o acesso à câmera nas Configurações do Android.',
+      );
+      return;
+    }
     try {
       const result = await launchCamera({
         mediaType: 'photo',
@@ -276,6 +362,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   };
 
   const pickFromGallery = async () => {
+    const ok = await ensureGalleryPermission();
+    if (!ok) {
+      Alert.alert(
+        'Permissão negada',
+        'Para escolher fotos, libere o acesso ao armazenamento nas Configurações do Android.',
+      );
+      return;
+    }
     try {
       const result = await launchImageLibrary({
         mediaType: 'photo',
@@ -309,6 +403,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         Alert.alert(
           'STT não configurado',
           'Para usar o microfone, defina o caminho do modelo Whisper em Settings.',
+        );
+        return;
+      }
+      const ok = await ensureAudioPermission();
+      if (!ok) {
+        Alert.alert(
+          'Permissão negada',
+          'Para gravar áudio, libere o acesso ao microfone nas Configurações do Android.',
         );
         return;
       }
@@ -423,8 +525,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       .reverse()
       .find(m => m.role === 'user');
     if (!prevUser) return;
-    // Extrai texto da mensagem do user (pode ser multimodal, mas regenerate
-    // só reenvia o texto — imagens não são reanexadas automaticamente).
+    // Preserva o content original (texto OU multimodal com imagens).
+    // Antes, só reenviávamos o texto (getTextContent) — isso descartava
+    // as imagens anexadas e fazia a imagem sumir do chat. Agora passamos
+    // o content completo: a mensagem recriada pelo send() terá as mesmas
+    // partes (texto+image_url), e o modelo recebe a imagem igualzinha.
+    const userContent = prevUser.content;
     const userText = getTextContent(prevUser);
     const userId = prevUser.id;
     // Remove tanto a resposta antiga quanto a pergunta antiga.
@@ -433,7 +539,8 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       prev.filter(m => m.id !== msg.id && m.id !== userId),
     );
     // Pequeno delay p/ o setMessages aplicar antes do send.
-    setTimeout(() => send(userText), 0);
+    // Passa userContent (preserva imagens) e userText (fallback nos bubbles).
+    setTimeout(() => send(userText, userContent), 0);
   };
 
   const deleteMessage = (msg: Message) => {
