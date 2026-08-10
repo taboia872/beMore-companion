@@ -9,6 +9,7 @@ import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.*
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.IllegalStateException
 
 /**
  * PcmRecorderModule — NativeModule que grava áudio via AudioRecord (PCM 16-bit, 16kHz, mono)
@@ -45,9 +46,6 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             }
 
             // Defensive: checar permissão runtime ANTES de instanciar AudioRecord.
-            // Em Android 6+ (API 23+) AudioRecord sem permissão pode lançar
-            // SecurityException silenciosa (crash nativo em alguns dispositivos).
-            // O hook JS também pede permissão, mas NEVER trust JS-side alone.
             val permGranted = ContextCompat.checkSelfPermission(
                 reactApplicationContext, Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
@@ -57,6 +55,10 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             }
 
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, ENCODING)
+            if (minBuf <= 0) {
+                promise.reject("BUFFER_ERROR", "AudioRecord.getMinBufferSize retornou $minBuf — microfone indisponível ou configuração inválida.")
+                return
+            }
             val bufferSize = (minBuf * 2).coerceAtLeast(3200)
 
             audioRecord = AudioRecord(
@@ -68,13 +70,19 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                promise.reject("INIT_ERROR", "AudioRecord init failed")
+                promise.reject("INIT_ERROR", "AudioRecord init failed — state != INITIALIZED")
                 return
             }
 
             val wavFile = File(path)
             val dir = wavFile.parentFile
-            if (dir != null && !dir.exists()) dir.mkdirs()
+            if (dir != null && !dir.exists()) {
+                val created = dir.mkdirs()
+                if (!created && !dir.exists()) {
+                    promise.reject("DIR_ERROR", "Não foi possível criar o diretório: ${dir.absolutePath}")
+                    return
+                }
+            }
             if (wavFile.exists()) wavFile.delete()
 
             val pcmFile = File(path.replace(".wav", ".pcm"))
@@ -84,30 +92,50 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             isRecording = true
 
             recordThread = Thread {
-                val buffer = ShortArray(bufferSize)
-                val fos = FileOutputStream(pcmFile)
-                while (isRecording) {
-                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
-                    if (read > 0) {
-                        val byteBuffer = ByteArray(read * 2)
-                        for (i in 0 until read) {
-                            byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
-                            byteBuffer[i * 2 + 1] = ((buffer[i].toInt() shr 8) and 0xFF).toByte()
+                try {
+                    val buffer = ShortArray(bufferSize)
+                    FileOutputStream(pcmFile).use { fos ->
+                        while (isRecording) {
+                            val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
+                            if (read > 0) {
+                                val byteBuffer = ByteArray(read * 2)
+                                for (i in 0 until read) {
+                                    byteBuffer[i * 2] = (buffer[i].toInt() and 0xFF).toByte()
+                                    byteBuffer[i * 2 + 1] = ((buffer[i].toInt() shr 8) and 0xFF).toByte()
+                                }
+                                fos.write(byteBuffer)
+                            }
                         }
-                        fos.write(byteBuffer)
                     }
+                    // Converter PCM → WAV
+                    writeWavHeader(wavFile, pcmFile)
+                    pcmFile.delete()
+                } catch (e: Exception) {
+                    // Captura exceções do thread de gravação para evitar crash nativo.
+                    // O erro será detectado no JS quando stopRecording retornar
+                    // e o arquivo .wav não existir ou estiver vazio.
+                    android.util.Log.e("PcmRecorder", "Erro no thread de gravação", e)
+                    isRecording = false
+                    try { audioRecord?.stop() } catch (_: Exception) {}
+                    try { audioRecord?.release() } catch (_: Exception) {}
+                    audioRecord = null
                 }
-                fos.close()
-
-                // Converter PCM → WAV
-                writeWavHeader(wavFile, pcmFile)
-                pcmFile.delete()
             }
             recordThread?.start()
 
             promise.resolve(path)
+        } catch (e: SecurityException) {
+            isRecording = false
+            audioRecord = null
+            promise.reject("SECURITY_ERROR", "Sem permissão de microfone: ${e.message}")
+        } catch (e: IllegalArgumentException) {
+            isRecording = false
+            audioRecord = null
+            promise.reject("ILLEGAL_ARG", "Parâmetros de AudioRecord inválidos: ${e.message}")
         } catch (e: Exception) {
-            promise.reject("START_ERROR", e.message)
+            isRecording = false
+            audioRecord = null
+            promise.reject("START_ERROR", e.message ?: "Erro desconhecido ao iniciar gravação")
         }
     }
 
@@ -120,12 +148,14 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             isRecording = false
             recordThread?.join(5000)
             recordThread = null
-            audioRecord?.stop()
+            try { audioRecord?.stop() } catch (_: IllegalStateException) {
+                // AudioRecord.stop() pode IllegalStateException se não estiver gravando
+            }
             audioRecord?.release()
             audioRecord = null
             promise.resolve("stopped")
         } catch (e: Exception) {
-            promise.reject("STOP_ERROR", e.message)
+            promise.reject("STOP_ERROR", e.message ?: "Erro ao parar gravação")
         }
     }
 
@@ -134,56 +164,56 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
      */
     private fun writeWavHeader(wavFile: File, pcmFile: File) {
         val pcmSize = pcmFile.length().toInt()
-        val fos = FileOutputStream(wavFile)
-        val header = ByteArray(44)
+        FileOutputStream(wavFile).use { fos ->
+            val header = ByteArray(44)
 
-        // RIFF chunk descriptor
-        header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte()
-        header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
-        val totalSize = pcmSize + 36
-        header[4] = (totalSize and 0xff).toByte()
-        header[5] = ((totalSize shr 8) and 0xff).toByte()
-        header[6] = ((totalSize shr 16) and 0xff).toByte()
-        header[7] = ((totalSize shr 24) and 0xff).toByte()
-        header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte()
-        header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
+            // RIFF chunk descriptor
+            header[0] = 'R'.code.toByte(); header[1] = 'I'.code.toByte()
+            header[2] = 'F'.code.toByte(); header[3] = 'F'.code.toByte()
+            val totalSize = pcmSize + 36
+            header[4] = (totalSize and 0xff).toByte()
+            header[5] = ((totalSize shr 8) and 0xff).toByte()
+            header[6] = ((totalSize shr 16) and 0xff).toByte()
+            header[7] = ((totalSize shr 24) and 0xff).toByte()
+            header[8] = 'W'.code.toByte(); header[9] = 'A'.code.toByte()
+            header[10] = 'V'.code.toByte(); header[11] = 'E'.code.toByte()
 
-        // fmt sub-chunk
-        header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte()
-        header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
-        header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0  // sub-chunk size = 16
-        header[20] = 1; header[21] = 0   // audio format = 1 (PCM)
-        header[22] = 1; header[23] = 0   // num channels = 1 (mono)
-        header[24] = (SAMPLE_RATE and 0xff).toByte()
-        header[25] = ((SAMPLE_RATE shr 8) and 0xff).toByte()
-        header[26] = ((SAMPLE_RATE shr 16) and 0xff).toByte()
-        header[27] = ((SAMPLE_RATE shr 24) and 0xff).toByte()
-        val byteRate = SAMPLE_RATE * 2  // 16-bit mono = 2 bytes per sample
-        header[28] = (byteRate and 0xff).toByte()
-        header[29] = ((byteRate shr 8) and 0xff).toByte()
-        header[30] = ((byteRate shr 16) and 0xff).toByte()
-        header[31] = ((byteRate shr 24) and 0xff).toByte()
-        header[32] = 2; header[33] = 0   // block align = 2
-        header[34] = 16; header[35] = 0  // bits per sample = 16
+            // fmt sub-chunk
+            header[12] = 'f'.code.toByte(); header[13] = 'm'.code.toByte()
+            header[14] = 't'.code.toByte(); header[15] = ' '.code.toByte()
+            header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0  // sub-chunk size = 16
+            header[20] = 1; header[21] = 0   // audio format = 1 (PCM)
+            header[22] = 1; header[23] = 0   // num channels = 1 (mono)
+            header[24] = (SAMPLE_RATE and 0xff).toByte()
+            header[25] = ((SAMPLE_RATE shr 8) and 0xff).toByte()
+            header[26] = ((SAMPLE_RATE shr 16) and 0xff).toByte()
+            header[27] = ((SAMPLE_RATE shr 24) and 0xff).toByte()
+            val byteRate = SAMPLE_RATE * 2  // 16-bit mono = 2 bytes per sample
+            header[28] = (byteRate and 0xff).toByte()
+            header[29] = ((byteRate shr 8) and 0xff).toByte()
+            header[30] = ((byteRate shr 16) and 0xff).toByte()
+            header[31] = ((byteRate shr 24) and 0xff).toByte()
+            header[32] = 2; header[33] = 0   // block align = 2
+            header[34] = 16; header[35] = 0  // bits per sample = 16
 
-        // data sub-chunk
-        header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte()
-        header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
-        header[40] = (pcmSize and 0xff).toByte()
-        header[41] = ((pcmSize shr 8) and 0xff).toByte()
-        header[42] = ((pcmSize shr 16) and 0xff).toByte()
-        header[43] = ((pcmSize shr 24) and 0xff).toByte()
+            // data sub-chunk
+            header[36] = 'd'.code.toByte(); header[37] = 'a'.code.toByte()
+            header[38] = 't'.code.toByte(); header[39] = 'a'.code.toByte()
+            header[40] = (pcmSize and 0xff).toByte()
+            header[41] = ((pcmSize shr 8) and 0xff).toByte()
+            header[42] = ((pcmSize shr 16) and 0xff).toByte()
+            header[43] = ((pcmSize shr 24) and 0xff).toByte()
 
-        fos.write(header)
+            fos.write(header)
 
-        // Copiar dados PCM atrás do header
-        pcmFile.inputStream().use { input ->
-            val copyBuf = ByteArray(4096)
-            var read: Int
-            while (input.read(copyBuf).also { read = it } > 0) {
-                fos.write(copyBuf, 0, read)
+            // Copiar dados PCM atrás do header
+            pcmFile.inputStream().use { input ->
+                val copyBuf = ByteArray(4096)
+                var read: Int
+                while (input.read(copyBuf).also { read = it } > 0) {
+                    fos.write(copyBuf, 0, read)
+                }
             }
         }
-        fos.close()
     }
 }
