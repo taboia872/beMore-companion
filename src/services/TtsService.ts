@@ -236,12 +236,13 @@ export function speakText(params: TtsParams): Promise<void> {
       });
 
   return new Promise<void>((resolve, reject) => {
-    // XHR com responseType='base64' — extensao do RN para obter
-    // dados binários como string base64. Mais confiavel que
-    // fetch+blob+FileReader no Android.
+    // XHR: Gemini retorna JSON (responseType='text'), OpenAI-compat
+    // retorna MP3 binário (responseType='base64' — extensão RN).
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
-    xhr.responseType = 'base64' as any;
+    // Gemini: responseType='text' para ler JSON diretamente.
+    // OpenAI-compat: responseType='base64' para obter MP3 binário.
+    xhr.responseType = (gemini ? 'text' : 'base64') as any;
     xhr.setRequestHeader('Content-Type', 'application/json');
     // Gemini usa ?key= na URL, não Bearer. OpenAI-compat usa Bearer.
     if (!gemini && apiKey) {
@@ -279,16 +280,24 @@ export function speakText(params: TtsParams): Promise<void> {
       let fileExt: string;
 
       if (gemini) {
-        // Gemini retorna JSON com base64 PCM dentro de inlineData.data.
-        // XHR responseType=base64 codifica o body inteiro da resposta
-        // (que é JSON texto) em base64. Precisamos decodificar para
-        // ler o JSON, extrair o PCM, e re-codificar como WAV.
+        // Gemini retorna JSON (não binário!) com o PCM base64 dentro de
+        // candidates[0].content.parts[0].inlineData.data.
+        //
+        // Problema: com responseType='base64', o RN codifica o body JSON
+        // inteiro em base64. Decodificar megabytes de base64 manualmente
+        // no JS é lento e propenso a bugs com caracteres multibyte.
+        //
+        // Solução: usar uma segunda XHR com responseType='text' para o
+        // Gemini, obtendo o JSON diretamente como string. O PCM base64
+        // dentro do JSON já está codificado — só precisamos extrair e
+        // envelopar em WAV.
         try {
-          // XHR com responseType=base64 retorna o body inteiro como base64.
-          // Decodifica para obter o JSON texto.
-          const jsonB64: string = xhr.response || '';
-          // Decodifica base64 → string. RN sem atob: usamos decode inline.
-          const jsonStr = base64Decode(jsonB64);
+          // responseType='text' → xhr.response é o JSON string.
+          const jsonStr: string = (xhr.response as string) || xhr.responseText || '';
+          if (!jsonStr) {
+            reject(new Error('Gemini TTS retornou resposta vazia.'));
+            return;
+          }
           const parsed = JSON.parse(jsonStr);
           const pcmB64 =
             parsed?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data ?? '';
@@ -336,30 +345,6 @@ export function speakText(params: TtsParams): Promise<void> {
   });
 }
 
-/**
- * Decodifica base64 para string UTF-8.
- * Implementação compatível com Hermes/RN (sem atob).
- */
-function base64Decode(b64: string): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const clean = b64.replace(/=+$/, '');
-  let result = '';
-  let i = 0;
-  // Processa 4 chars base64 → 3 bytes por vez.
-  let bits = 0;
-  let accum = 0;
-  for (i = 0; i < clean.length; i++) {
-    const c = chars.indexOf(clean[i]);
-    if (c === -1) continue;
-    accum = (accum << 6) | c;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      result += String.fromCharCode((accum >> bits) & 0xff);
-    }
-  }
-  return result;
-}
 
 /**
  * Toca um arquivo de áudio local.
