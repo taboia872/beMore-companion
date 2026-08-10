@@ -74,12 +74,15 @@ export function useRecorder(): UseRecorder {
         setErrorMessage('Gravador nativo indisponível nesta plataforma.');
         return;
       }
-      // Caminho dentro do sandbox do app: tmp dir do RN (gerenciada pelo sistema).
-      // Prefixo de cada app Android: /data/data/<pkg>/files ou cache.
+      // Caminho dentro do sandbox do app. O JS só constrói o nome do arquivo;
+      // o módulo nativo (Kotlin) resolve o caminho real usando filesDir do
+      // Android, que pode ser diferente de /data/data/<pkg>/files em
+      // multi-user, perfil de trabalho, ou storage adotável.
+      // O nativo retorna o caminho resolvido, que usamos para transcrição.
       fileNameCounter.current += 1;
-      const path = `/data/data/com.bemore.companion/files/recording_${Date.now()}_${fileNameCounter.current}.wav`;
-      await audioService.startRecording(path);
-      setLastFilePath(path);
+      const fileName = `recording_${Date.now()}_${fileNameCounter.current}.wav`;
+      const resolvedPath = await audioService.startRecording(fileName);
+      setLastFilePath(resolvedPath);
       setStatus('recording');
     } catch (e) {
       setStatus('error');

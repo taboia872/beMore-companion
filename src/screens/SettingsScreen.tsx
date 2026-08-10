@@ -36,7 +36,8 @@ interface Props {
 }
 
 interface RemoteModel {
-  id: string;
+  id?: string;
+  name?: string; // Google AI Studio usa "name" em vez de "id" (formato "models/gemini-2.0-flash")
 }
 
 /**
@@ -251,8 +252,14 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
       const data = await response.json();
       const models: RemoteModel[] = data?.data ?? data?.models ?? [];
       const ids = models
-        .map(m => m.id)
-        .filter((id): id is string => typeof id === 'string');
+        .map(m => {
+          // Google AI Studio usa campo "name" (formato "models/gemini-2.0-flash")
+          // em vez de "id". Removemos o prefixo "models/" para ficar limpo.
+          const raw = m.id ?? m.name ?? '';
+          if (typeof raw !== 'string') return '';
+          return raw.replace(/^models\//, '');
+        })
+        .filter((id): id is string => id.length > 0);
       if (ids.length === 0) {
         Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
         return;
@@ -666,8 +673,12 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                       const data = await response.json();
                       const models: RemoteModel[] = data?.data ?? data?.models ?? [];
                       const ids = models
-                        .map(m => m.id)
-                        .filter((id): id is string => typeof id === 'string');
+                        .map(m => {
+                          const raw = m.id ?? m.name ?? '';
+                          if (typeof raw !== 'string') return '';
+                          return raw.replace(/^models\//, '');
+                        })
+                        .filter((id): id is string => id.length > 0);
                       if (ids.length === 0) {
                         Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
                         return;

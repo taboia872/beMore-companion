@@ -74,7 +74,14 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
                 return
             }
 
-            val wavFile = File(path)
+            // Usar filesDir do contexto em vez do path hardcoded do JS.
+            // O path JS (/data/data/<pkg>/files/...) pode não corresponder
+            // ao sandbox real em multi-user, perfil de trabalho, ou storage
+            // adotável. Extrai apenas o nome do arquivo e constrói o caminho
+            // no filesDir garantido pelo Android.
+            val fileName = File(path).name  // ex: recording_12345_1.wav
+            val filesDir = reactApplicationContext.filesDir
+            val wavFile = File(filesDir, fileName)
             val dir = wavFile.parentFile
             if (dir != null && !dir.exists()) {
                 val created = dir.mkdirs()
@@ -85,11 +92,14 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             }
             if (wavFile.exists()) wavFile.delete()
 
-            val pcmFile = File(path.replace(".wav", ".pcm"))
+            val pcmFileName = fileName.replace(".wav", ".pcm")
+            val pcmFile = File(filesDir, pcmFileName)
             if (pcmFile.exists()) pcmFile.delete()
 
             audioRecord?.startRecording()
             isRecording = true
+
+            val resolvedPath = wavFile.absolutePath
 
             recordThread = Thread {
                 try {
@@ -123,7 +133,9 @@ class PcmRecorderModule(reactContext: ReactApplicationContext) :
             }
             recordThread?.start()
 
-            promise.resolve(path)
+            // Retorna o caminho resolvido (filesDir + fileName) para o JS,
+            // não o path original hardcoded que pode estar errado.
+            promise.resolve(resolvedPath)
         } catch (e: SecurityException) {
             isRecording = false
             audioRecord = null
