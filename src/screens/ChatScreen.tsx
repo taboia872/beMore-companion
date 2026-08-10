@@ -638,7 +638,11 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       apiKey = await loadApiKeyForServer(baseUrl);
     } else {
       baseUrl = settings.llm.baseUrl;
+      // Tenta usar a apiKey do settings; se vazia, carrega do Keychain.
       apiKey = settings.llm.apiKey ?? '';
+      if (!apiKey) {
+        apiKey = await loadApiKeyForServer(baseUrl);
+      }
     }
 
     setSpeakingId(msg.id ?? null);

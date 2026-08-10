@@ -73,6 +73,12 @@ const TTS_PATTERNS: string[] = [
   'f5-tts',
   'e2-tts',
   'speech',
+  // Gemini TTS (também any-to-any) — modelos de áudio que fazem synthesis
+  'gemini-2.5-flash-preview-tts',
+  'gemini-2.5-pro-preview-tts',
+  'gemini-flash-latest-tts',
+  'gemini-2.5-flash-tts',
+  'gemini-2.5-pro-tts',
 ];
 
 // ---------------------------------------------------------------------------

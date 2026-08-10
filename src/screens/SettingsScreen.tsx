@@ -740,128 +740,140 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
         {/* Card: Voz (TTS) — síntese de áudio via API online */}
         <Card title="Voz (TTS)" icon="volume-up">
-          <Text style={s.hint}>
-            Síntese de voz via API online (Groq TTS, OpenAI TTS, etc). Usa o
-            modelo selecionado abaixo com o servidor atual{draft.ttsServerOverride?.trim() ? ' (override)' : ''}.
-          </Text>
-          <Text style={s.label}>Modelo TTS</Text>
-          <View style={s.modelRow}>
-            <TextInput
-              style={[s.input, s.modelInput]}
-              value={draft.ttsOnlineModel ?? ''}
-              placeholder="tts-1, tts-1-hd, etc"
-              placeholderTextColor="#aab2bc"
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={v => setDraft({...draft, ttsOnlineModel: v})}
-            />
-            <TouchableOpacity
-              style={s.fetchBtn}
-              onPress={async () => {
-                if (!draft.llm.baseUrl?.trim() && !draft.ttsServerOverride?.trim()) {
-                  Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
-                  return;
-                }
-                setFetchingModels(true);
-                setModelFilter('all');
-                try {
-                  const baseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
-                  let url: string;
-                  let useQueryParamKey = false;
-                  if (baseUrl.includes('openrouter.ai')) {
-                    url = 'https://openrouter.ai/api/v1/models';
-                  } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-                    url = `${baseUrl}/models`;
-                    useQueryParamKey = true;
-                  } else {
-                    url = `${baseUrl}/models`;
-                  }
-                  const apiKey = draft.ttsServerOverride?.trim()
-                    ? await loadApiKeyForServer(draft.ttsServerOverride.trim())
-                    : draft.llm.apiKey ?? '';
-                  const headers: Record<string, string> = {};
-                  if (apiKey && !useQueryParamKey) {
-                    headers['Authorization'] = `Bearer ${apiKey}`;
-                  }
-                  if (useQueryParamKey && apiKey) {
-                    url = `${url}?key=${encodeURIComponent(apiKey)}`;
-                  }
-                  const response = await fetch(url, {method: 'GET', headers});
-                  if (!response.ok) {
-                    const errText = await response.text();
-                    throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
-                  }
-                  const data = await response.json();
-                  const models: RemoteModel[] = data?.data ?? data?.models ?? [];
-                  const ids = models
-                    .map(m => {
-                      const raw = m.id ?? m.name ?? '';
-                      if (typeof raw !== 'string') return '';
-                      return raw.replace(/^models\//, '');
-                    })
-                    .filter((id): id is string => id.length > 0);
-                  if (ids.length === 0) {
-                    Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
-                    return;
-                  }
-                  ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
-                  setAvailableModels(ids);
-                  setTtsPickerMode(true);
-                  setShowModelsModal(true);
-                } catch (e) {
-                  Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
-                } finally {
-                  setFetchingModels(false);
-                }
-              }}
-              disabled={fetchingModels}>
-              {fetchingModels ? (
-                <ActivityIndicator size="small" color="#fff" />
-              ) : (
-                <Icon name="search" size={20} color="#fff" />
-              )}
-            </TouchableOpacity>
-          </View>
-          {draft.ttsOnlineModel?.trim() && (
-            <View style={s.sttModelSelected}>
-              <Icon name="check-circle" size={14} color="#2dd4bf" />
-              <Text style={s.sttModelSelectedText}>
-                {draft.ttsOnlineModel}
-              </Text>
-            </View>
-          )}
+          {(() => {
+            const ttsBaseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl || '');
+            const isGemini = ttsBaseUrl.includes('generativelanguage.googleapis.com');
+            return (
+              <>
+                <Text style={s.hint}>
+                  {isGemini
+                    ? 'Síntese de voz via Google AI Studio (Gemini). Retorna áudio PCM 24kHz (convertido para WAV).'
+                    : 'Síntese de voz via API online (Groq TTS, OpenAI TTS, etc).'}{' '}
+                  Usa o modelo selecionado abaixo com o servidor
+                  atual{draft.ttsServerOverride?.trim() ? ' (override)' : ''}.
+                </Text>
+                <Text style={s.label}>Modelo TTS</Text>
+                <View style={s.modelRow}>
+                  <TextInput
+                    style={[s.input, s.modelInput]}
+                    value={draft.ttsOnlineModel ?? ''}
+                    placeholder={isGemini ? 'gemini-2.5-flash-preview-tts' : 'tts-1, tts-1-hd, etc'}
+                    placeholderTextColor="#aab2bc"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    onChangeText={v => setDraft({...draft, ttsOnlineModel: v})}
+                  />
+                  <TouchableOpacity
+                    style={s.fetchBtn}
+                    onPress={async () => {
+                      if (!draft.llm.baseUrl?.trim() && !draft.ttsServerOverride?.trim()) {
+                        Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
+                        return;
+                      }
+                      setFetchingModels(true);
+                      setModelFilter('all');
+                      try {
+                        const baseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
+                        let url: string;
+                        let useQueryParamKey = false;
+                        if (baseUrl.includes('openrouter.ai')) {
+                          url = 'https://openrouter.ai/api/v1/models';
+                        } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
+                          url = `${baseUrl}/models`;
+                          useQueryParamKey = true;
+                        } else {
+                          url = `${baseUrl}/models`;
+                        }
+                        const apiKey = draft.ttsServerOverride?.trim()
+                          ? await loadApiKeyForServer(draft.ttsServerOverride.trim())
+                          : draft.llm.apiKey ?? '';
+                        const headers: Record<string, string> = {};
+                        if (apiKey && !useQueryParamKey) {
+                          headers['Authorization'] = `Bearer ${apiKey}`;
+                        }
+                        if (useQueryParamKey && apiKey) {
+                          url = `${url}?key=${encodeURIComponent(apiKey)}`;
+                        }
+                        const response = await fetch(url, {method: 'GET', headers});
+                        if (!response.ok) {
+                          const errText = await response.text();
+                          throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+                        }
+                        const data = await response.json();
+                        const models: RemoteModel[] = data?.data ?? data?.models ?? [];
+                        const ids = models
+                          .map(m => {
+                            const raw = m.id ?? m.name ?? '';
+                            if (typeof raw !== 'string') return '';
+                            return raw.replace(/^models\//, '');
+                          })
+                          .filter((id): id is string => id.length > 0);
+                        if (ids.length === 0) {
+                          Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
+                          return;
+                        }
+                        ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+                        setAvailableModels(ids);
+                        setTtsPickerMode(true);
+                        setShowModelsModal(true);
+                      } catch (e) {
+                        Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
+                      } finally {
+                        setFetchingModels(false);
+                      }
+                    }}
+                    disabled={fetchingModels}>
+                    {fetchingModels ? (
+                      <ActivityIndicator size="small" color="#fff" />
+                    ) : (
+                      <Icon name="search" size={20} color="#fff" />
+                    )}
+                  </TouchableOpacity>
+                </View>
+                {draft.ttsOnlineModel?.trim() && (
+                  <View style={s.sttModelSelected}>
+                    <Icon name="check-circle" size={14} color="#2dd4bf" />
+                    <Text style={s.sttModelSelectedText}>
+                      {draft.ttsOnlineModel}
+                    </Text>
+                  </View>
+                )}
 
-          {/* Voz (dropdown simples) */}
-          <Text style={s.label}>Voz</Text>
-          <TextInput
-            style={s.input}
-            value={draft.ttsVoice ?? ''}
-            placeholder="alloy, nova, shimmer, echo, fable, onyx"
-            placeholderTextColor="#aab2bc"
-            autoCapitalize="none"
-            autoCorrect={false}
-            onChangeText={v => setDraft({...draft, ttsVoice: v})}
-          />
-          <Text style={s.hint}>
-            Vozes podem variar por provedor. OpenAI/Groq: alloy, nova, shimmer,
-            echo, fable, onyx. Deixe vazio para usar o padrão (alloy).
-          </Text>
+                {/* Voz */}
+                <Text style={s.label}>Voz</Text>
+                <TextInput
+                  style={s.input}
+                  value={draft.ttsVoice ?? ''}
+                  placeholder={isGemini ? 'Kore, Charon, Aoede, Fenrir...' : 'alloy, nova, shimmer, echo, fable, onyx'}
+                  placeholderTextColor="#aab2bc"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={v => setDraft({...draft, ttsVoice: v})}
+                />
+                <Text style={s.hint}>
+                  {isGemini
+                    ? 'Vozes Gemini: Achernar, Aoede, Charon, Kore, Fenrir, Leda, Puck, Zephyr, etc. Deixe vazio para Kore (padrão).'
+                    : 'Vozes podem variar por provedor. OpenAI/Groq: alloy, nova, shimmer, echo, fable, onyx. Deixe vazio para alloy.'}
+                </Text>
 
-          {/* Override de servidor TTS (opcional) */}
-          <Text style={s.label}>Servidor TTS (opcional)</Text>
-          <TextInput
-            style={s.input}
-            value={draft.ttsServerOverride ?? ''}
-            placeholder="Deixe vazio para usar o mesmo do chat"
-            placeholderTextColor="#aab2bc"
-            autoCapitalize="none"
-            autoCorrect={false}
-            onChangeText={v => setDraft({...draft, ttsServerOverride: v})}
-          />
-          <Text style={s.hint}>
-            Por padrão usa a URL+API Key do servidor de chat. Preencha
-            para usar um servidor diferente só para TTS.
-          </Text>
+                {/* Override de servidor TTS (opcional) */}
+                <Text style={s.label}>Servidor TTS (opcional)</Text>
+                <TextInput
+                  style={s.input}
+                  value={draft.ttsServerOverride ?? ''}
+                  placeholder="Deixe vazio para usar o mesmo do chat"
+                  placeholderTextColor="#aab2bc"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={v => setDraft({...draft, ttsServerOverride: v})}
+                />
+                <Text style={s.hint}>
+                  Por padrão usa a URL+API Key do servidor de chat. Preencha
+                  para usar um servidor diferente só para TTS.
+                </Text>
+              </>
+            );
+          })()}
         </Card>
 
         {/* Card: Misc — agrupa Prompt do Sistema + Streaming de Respostas */}

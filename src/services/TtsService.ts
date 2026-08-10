@@ -1,15 +1,23 @@
 /**
  * TtsService — síntese de voz (Text-to-Speech) via API online.
  *
- * Usa o endpoint OpenAI-compatível POST /audio/speech que recebe
- * {model, input, voice} e retorna áudio binário (MP3).
+ * Suporta dois backends:
+ *
+ * 1. OpenAI-compatível (Groq, OpenAI, etc):
+ *    POST /audio/speech com {model, input, voice} → MP3 binário.
+ *
+ * 2. Google AI Studio (Gemini):
+ *    POST /models/{model}:generateContent?key=API_KEY
+ *    Body: {contents, generationConfig:{responseModalities:["AUDIO"],
+ *           speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName}}}}}
+ *    → base64 PCM L16 24kHz mono (raw). Precisa header WAV.
  *
  * Fluxo:
- *   1. POST /audio/speech com texto + modelo + voz
- *   2. Resposta é áudio binário (MP3) — XHR com responseType='base64'
- *      (extensão RN) para obter os bytes como base64
- *   3. Salvar em arquivo temporário no cacheDir (via RNFS)
- *   4. Tocar com react-native-sound
+ *   1. Detectar backend pela URL (generativelanguage.googleapis.com = Gemini)
+ *   2. POST com formato apropriado
+ *   3. XHR responseType='base64' (extensão RN) para obter bytes
+ *   4. Salvar em arquivo temporário (MP3 ou WAV) no cacheDir (via RNFS)
+ *   5. Tocar com react-native-sound
  *
  * Suporta servidor independente (ttsServerOverride) com sua própria
  * API key no Keychain, permitindo usar um provedor diferente do LLM.
@@ -22,21 +30,35 @@ import Sound from 'react-native-sound';
 export interface TtsParams {
   /** URL base do servidor (ex: https://api.groq.com/openai/v1) */
   baseUrl: string;
-  /** API key (Bearer token) */
+  /** API key (Bearer token para OpenAI-compat, ?key= para Gemini) */
   apiKey: string;
-  /** Nome do modelo (ex: tts-1, tts-1-hd) */
+  /** Nome do modelo (ex: tts-1, gemini-2.5-flash-preview-tts) */
   model: string;
   /** Texto a sintetizar */
   input: string;
-  /** Voz (ex: alloy, nova, shimmer, echo, fable, onyx) */
+  /** Voz — ex: alloy/nova (OpenAI) ou Kore/Charon (Gemini) */
   voice?: string;
 }
 
 /**
- * Constrói a URL completa do endpoint de síntese.
+ * Detecta se a URL é do Google AI Studio (Gemini).
  */
-function buildSpeechUrl(baseUrl: string): string {
+function isGemini(baseUrl: string): boolean {
+  return baseUrl.includes('generativelanguage.googleapis.com');
+}
+
+/**
+ * Constrói a URL completa do endpoint de síntese.
+ * OpenAI-compat: {baseUrl}/audio/speech
+ * Gemini: {baseUrl}/models/{model}:generateContent?key={apiKey}
+ */
+function buildSpeechUrl(baseUrl: string, model: string, apiKey: string): string {
   const clean = baseUrl.trim().replace(/\/+$/, '');
+  if (isGemini(clean)) {
+    // Gemini: ?key= na query string
+    const key = apiKey ? `?key=${encodeURIComponent(apiKey)}` : '';
+    return `${clean}/models/${model}:generateContent${key}`;
+  }
   return `${clean}/audio/speech`;
 }
 
@@ -44,7 +66,132 @@ function buildSpeechUrl(baseUrl: string): string {
 let activeSound: Sound | null = null;
 
 /**
+ * Vozes predefinidas do Gemini TTS.
+ * Referência: https://ai.google.dev/gemini-api/docs/speech-generation
+ */
+const GEMINI_VOICES = [
+  'Achernar', 'Achird', 'Algenib', 'Algieba', 'Alnilam',
+  'Aoede', 'Autonoe', 'Charon', 'Despina', 'Enceladus',
+  'Fenrir', 'Gacrux', 'Iapetus', 'Kore', 'Leda',
+  'Orus', 'Puck', 'Pulcherrima', 'Rasalgethi', 'Sadachbia',
+  'Sadbetanus', 'Sulafat', 'Umbriel', 'Vindemiatrix', 'Zephyr',
+  'Zubenelgenubi',
+] as const;
+
+/**
+ * Converte um nome de voz para o formato aceito pelo Gemini.
+ * Se a voz não estiver na lista, usa 'Kore' (padrão).
+ */
+function normalizeGeminiVoice(voice?: string): string {
+  if (!voice || !voice.trim()) return 'Kore';
+  const v = voice.trim();
+  // Match case-insensitive contra a lista conhecida.
+  const found = GEMINI_VOICES.find(g => g.toLowerCase() === v.toLowerCase());
+  return found ?? 'Kore';
+}
+
+/**
+ * Adiciona um header WAV canônico a um PCM raw 16-bit 24kHz mono.
+ * Retorna o conteúdo completo (header + data) como base64.
+ *
+ * Gemini TTS retorna audio/L16;rate=24000 — PCM 16-bit signed little-endian,
+ * 24000 Hz, mono. Precisamos envolver em WAV para react-native-sound tocar.
+ */
+function pcm16ToWavBase64(pcmBase64: string, sampleRate = 24000): string {
+  // Decodifica base64 → bytes PCM. Usa atob via polyfill do RN.
+  // RN não tem atob nativo sem remote debugging, mas XHR responseType=base64
+  // já nos deu a string. Precisamos dos bytes brutos.
+  // Alternativa: manipular strings base64 diretamente (prepend do header
+  // WAV também em base64).
+
+  // Tamanho do PCM em bytes. base64 → bytes: cada 4 chars base64 = 3 bytes.
+  // Mas pode haver padding (=). Calculamos de forma segura.
+  const cleanB64 = pcmBase64.replace(/=+$/, '');
+  const pcmByteLength = Math.floor(cleanB64.length * 3 / 4);
+
+  // Header WAV = 44 bytes. Estrutura:
+  //   "RIFF" (4) + chunkSize (4) + "WAVE" (4)
+  //   "fmt " (4) + subchunk1Size (4) + audioFormat (2) + numChannels (2)
+  //   + sampleRate (4) + byteRate (4) + blockAlign (2) + bitsPerSample (2)
+  //   "data" (4) + subchunk2Size (4)
+  //   = 44 bytes total
+  const headerSize = 44;
+  const totalSize = headerSize + pcmByteLength;
+  const byteRate = sampleRate * 2; // 16-bit mono = 2 bytes/sample
+
+  // Constrói o header como um ArrayBuffer→Uint8Array.
+  const header = new Uint8Array(headerSize);
+  const dv = new DataView(header.buffer);
+
+  // RIFF chunk descriptor
+  dv.setUint8(0, 0x52);  // 'R'
+  dv.setUint8(1, 0x49);  // 'I'
+  dv.setUint8(2, 0x46);  // 'F'
+  dv.setUint8(3, 0x46);  // 'F'
+  dv.setUint32(4, 36 + pcmByteLength, true); // chunkSize
+  dv.setUint8(8, 0x57);  // 'W'
+  dv.setUint8(9, 0x41);  // 'A'
+  dv.setUint8(10, 0x56); // 'V'
+  dv.setUint8(11, 0x45); // 'E'
+
+  // fmt sub-chunk
+  dv.setUint8(12, 0x66); // 'f'
+  dv.setUint8(13, 0x6d); // 'm'
+  dv.setUint8(14, 0x74); // 't'
+  dv.setUint8(15, 0x20); // ' '
+  dv.setUint32(16, 16, true);   // subchunk1Size = 16
+  dv.setUint16(20, 1, true);    // audioFormat = 1 (PCM)
+  dv.setUint16(22, 1, true);    // numChannels = 1 (mono)
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, byteRate, true);
+  dv.setUint16(32, 2, true);    // blockAlign = 2
+  dv.setUint16(34, 16, true);   // bitsPerSample = 16
+
+  // data sub-chunk
+  dv.setUint8(36, 0x64); // 'd'
+  dv.setUint8(37, 0x61); // 'a'
+  dv.setUint8(38, 0x74); // 't'
+  dv.setUint8(39, 0x61); // 'a'
+  dv.setUint32(40, pcmByteLength, true);
+
+  // Converter header para base64. RN não tem btoa nativo, mas podemos
+  // usar uma implementação manual simples para 44 bytes.
+  const headerB64 = uint8ToBase64(header);
+
+  // Concatena header base64 + PCM base64.
+  // Ambos já estão em base64 — basta concatenar as strings.
+  // O resultado é um WAV completo em base64.
+  return headerB64 + pcmBase64;
+}
+
+/**
+ * Converte Uint8Array para string base64 (semdependência externa).
+ * Implementação manual para 44 bytes — mais leve que importar uma lib.
+ */
+function uint8ToBase64(bytes: Uint8Array): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i];
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+
+    const triplet = (b0 << 16) | (b1 << 8) | b2;
+
+    result += chars[(triplet >> 18) & 0x3f];
+    result += chars[(triplet >> 12) & 0x3f];
+    result += i + 1 < bytes.length ? chars[(triplet >> 6) & 0x3f] : '=';
+    result += i + 2 < bytes.length ? chars[triplet & 0x3f] : '=';
+  }
+  return result;
+}
+
+/**
  * Sintetiza texto em áudio via API online e toca o resultado.
+ *
+ * Detecta automaticamente o backend:
+ * - Google AI Studio (Gemini): generateContent com responseModalities AUDIO
+ * - Outros (OpenAI-compat): /audio/speech com MP3
  *
  * @returns Promise que resolve quando o áudio termina de tocar
  * @throws Error com mensagem amigável em PT-BR
@@ -65,13 +212,28 @@ export function speakText(params: TtsParams): Promise<void> {
   // Limita texto para nao exceder limites da API (~4096 chars).
   const truncatedInput = input.length > 4000 ? input.slice(0, 4000) : input;
 
-  const url = buildSpeechUrl(baseUrl);
-  const body = JSON.stringify({
-    model,
-    input: truncatedInput,
-    voice: voice || 'alloy',
-    response_format: 'mp3',
-  });
+  const gemini = isGemini(baseUrl);
+  const url = buildSpeechUrl(baseUrl, model, apiKey);
+
+  // Body difere entre Gemini e OpenAI-compat.
+  const body = gemini
+    ? JSON.stringify({
+        contents: [{parts: [{text: truncatedInput}]}],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {voiceName: normalizeGeminiVoice(voice)},
+            },
+          },
+        },
+      })
+    : JSON.stringify({
+        model,
+        input: truncatedInput,
+        voice: voice || 'alloy',
+        response_format: 'mp3',
+      });
 
   return new Promise<void>((resolve, reject) => {
     // XHR com responseType='base64' — extensao do RN para obter
@@ -81,7 +243,8 @@ export function speakText(params: TtsParams): Promise<void> {
     xhr.open('POST', url);
     xhr.responseType = 'base64' as any;
     xhr.setRequestHeader('Content-Type', 'application/json');
-    if (apiKey) {
+    // Gemini usa ?key= na URL, não Bearer. OpenAI-compat usa Bearer.
+    if (!gemini && apiKey) {
       xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
     }
 
@@ -95,9 +258,6 @@ export function speakText(params: TtsParams): Promise<void> {
       }
 
       if (xhr.status < 200 || xhr.status >= 300) {
-        // Com responseType base64, a resposta de erro também vem codificada.
-        // Não confiamos em atob (não existe no Hermes sem remote debugging).
-        // Mostramos o status HTTP + uma mensagem genérica.
         if (xhr.status === 401 || xhr.status === 403) {
           reject(new Error('API Key inválida para TTS. Verifique nas configurações.'));
           return;
@@ -114,24 +274,57 @@ export function speakText(params: TtsParams): Promise<void> {
         return;
       }
 
-      // Sucesso — xhr.response contem o MP3 como base64.
-      const base64Data: string = xhr.response || '';
-      if (!base64Data) {
+      // Sucesso — processar áudio.
+      let audioB64: string;
+      let fileExt: string;
+
+      if (gemini) {
+        // Gemini retorna JSON com base64 PCM dentro de inlineData.data.
+        // XHR responseType=base64 codifica o body inteiro da resposta
+        // (que é JSON texto) em base64. Precisamos decodificar para
+        // ler o JSON, extrair o PCM, e re-codificar como WAV.
+        try {
+          // XHR com responseType=base64 retorna o body inteiro como base64.
+          // Decodifica para obter o JSON texto.
+          const jsonB64: string = xhr.response || '';
+          // Decodifica base64 → string. RN sem atob: usamos decode inline.
+          const jsonStr = base64Decode(jsonB64);
+          const parsed = JSON.parse(jsonStr);
+          const pcmB64 =
+            parsed?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data ?? '';
+          if (!pcmB64) {
+            reject(new Error('Gemini TTS respondeu sem áudio (inlineData.data vazio).'));
+            return;
+          }
+          // PCM L16 24kHz mono → WAV
+          audioB64 = pcm16ToWavBase64(pcmB64, 24000);
+          fileExt = 'wav';
+        } catch (e) {
+          reject(new Error('Erro ao processar resposta Gemini TTS: ' + (e as Error)?.message));
+          return;
+        }
+      } else {
+        // OpenAI-compat: resposta é MP3 binário direto em base64.
+        audioB64 = xhr.response || '';
+        fileExt = 'mp3';
+      }
+
+      if (!audioB64) {
         reject(new Error('Servidor TTS retornou áudio vazio.'));
         return;
       }
 
       // Salvar no cacheDir e tocar.
       try {
-        const fileName = `tts_${Date.now()}.mp3`;
+        const fileName = `tts_${Date.now()}.${fileExt}`;
         const audioPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
-        await RNFS.writeFile(audioPath, base64Data, 'base64');
+        await RNFS.writeFile(audioPath, audioB64, 'base64');
         await playAudioFile(audioPath);
         // Limpar arquivo após tocar.
         try { await RNFS.unlink(audioPath); } catch { /* no-op */ }
         resolve();
       } catch (e) {
-        reject(new Error('Falha ao salvar/tonar áudio TTS.'));
+        reject(new Error('Falha ao salvar/tocar áudio TTS.'));
       }
     };
 
@@ -141,6 +334,31 @@ export function speakText(params: TtsParams): Promise<void> {
 
     xhr.send(body);
   });
+}
+
+/**
+ * Decodifica base64 para string UTF-8.
+ * Implementação compatível com Hermes/RN (sem atob).
+ */
+function base64Decode(b64: string): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const clean = b64.replace(/=+$/, '');
+  let result = '';
+  let i = 0;
+  // Processa 4 chars base64 → 3 bytes por vez.
+  let bits = 0;
+  let accum = 0;
+  for (i = 0; i < clean.length; i++) {
+    const c = chars.indexOf(clean[i]);
+    if (c === -1) continue;
+    accum = (accum << 6) | c;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      result += String.fromCharCode((accum >> bits) & 0xff);
+    }
+  }
+  return result;
 }
 
 /**
