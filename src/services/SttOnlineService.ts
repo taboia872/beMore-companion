@@ -5,12 +5,9 @@
  * multipart/form-data (file + model).
  *
  * No React Native, FormData com {uri, type, name} é processado nativamente
- * como multipart/form-data pelo fetch. O caminho do arquivo deve ser o
- * path absoluto do sistema de arquivos (sem prefixo file:// no Android
- * quando já é um path absoluto /data/data/...).
+ * como multipart/form-data pelo fetch. O caminho do arquivo precisa do
+ * prefixo file:// em ambas as plataformas (Android e iOS).
  */
-
-import {Platform} from 'react-native';
 
 export interface SttOnlineParams {
   /** URL base do servidor (ex: https://api.groq.com/openai/v1) */
@@ -67,9 +64,11 @@ export async function transcribeAudioOnline(
 
   const url = buildTranscriptionUrl(baseUrl);
 
-  // No Android, caminhos absolutos (/data/data/...) funcionam diretamente
-  // como uri no FormData sem prefixo file://. No iOS, precisaria file://.
-  const fileUri = Platform.OS === 'android' ? filePath : `file://${filePath}`;
+  // No Android, o FormData precisa do prefixo file:// para ler arquivos
+  // locais. Sem o prefixo, o fetch lança "Network request failed" (parece
+  // erro de internet, mas na verdade é erro de leitura do arquivo).
+  // No iOS, o prefixo file:// também é necessário.
+  const fileUri = filePath.startsWith('file://') ? filePath : `file://${filePath}`;
 
   const formData = new FormData();
   formData.append('file', {
@@ -100,7 +99,7 @@ export async function transcribeAudioOnline(
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e);
     if (msg.includes('Network request') || msg.includes('network')) {
-      throw new Error('Sem internet. Verifique a conexão.');
+      throw new Error('Sem internet ou arquivo de áudio inválido. Verifique a conexão.');
     }
     throw new Error(`Falha de rede: ${msg}`);
   }
