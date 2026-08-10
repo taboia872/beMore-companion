@@ -20,6 +20,8 @@ import {
   Modal,
   Dimensions,
   PermissionsAndroid,
+  Animated,
+  Easing,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
@@ -55,6 +57,72 @@ function TypingDots() {
           style={[
             s.typingDot,
             active === i && s.typingDotActive,
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * WaveformAnimation — barras animadas simulando captação de áudio.
+ * Substitui o ActivityIndicator quando o gravador está ativo (recording).
+ * Cada barra tem altura animada com loop infinito e delays escalonados.
+ */
+const BAR_COUNT = 5;
+const BAR_MIN_HEIGHT = 6;
+const BAR_MAX_HEIGHT = 26;
+
+function WaveformAnimation() {
+  // Array de Animated.Value uma por barra
+  const [bars] = useState(() =>
+    Array.from({length: BAR_COUNT}, () => new Animated.Value(BAR_MIN_HEIGHT)),
+  );
+
+  useEffect(() => {
+    // Cada barra sobe e desce num loop com delay escalonado.
+    // A animação é suave e não bloqueia o JS thread (useNativeDriver implícito
+    // para height? Não — height não é supported por native driver. Mas é leve
+    // o suficiente com 5 barras para não causar jank.)
+    const animations = bars.map((bar, i) => {
+      return Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 90),
+          Animated.timing(bar, {
+            toValue: BAR_MAX_HEIGHT,
+            duration: 400,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: false,
+          }),
+          Animated.timing(bar, {
+            toValue: BAR_MIN_HEIGHT,
+            duration: 400,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: false,
+          }),
+          Animated.delay((BAR_COUNT - 1 - i) * 90),
+        ]),
+      );
+    });
+
+    // Inicia todas as animações
+    animations.forEach(a => a.start());
+
+    return () => {
+      animations.forEach(a => a.stop());
+      bars.forEach(b => b.setValue(BAR_MIN_HEIGHT));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <View style={s.waveformContainer}>
+      {bars.map((bar, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            s.waveformBar,
+            {height: bar},
           ]}
         />
       ))}
@@ -737,12 +805,19 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
       {/* Status do gravador / transcrição */}
       {(recorder.status === 'processing' ||
+        recorder.status === 'recording' ||
         whisper.status === 'transcribing') && (
         <View style={s.statusBar}>
-          <ActivityIndicator size="small" color="#58a6ff" />
+          {recorder.status === 'recording' ? (
+            <WaveformAnimation />
+          ) : (
+            <ActivityIndicator size="small" color="#58a6ff" />
+          )}
           <Text style={s.statusText}>
             {whisper.status === 'transcribing'
               ? 'Transcrevendo...'
+              : recorder.status === 'recording'
+              ? 'Gravando... toque para parar'
               : 'Processando áudio...'}
           </Text>
         </View>
@@ -1089,6 +1164,18 @@ const s = StyleSheet.create({
     color: '#8b949e',
     fontSize: 12,
     lineHeight: 16,
+  },
+  waveformContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 3,
+    height: 30,
+  },
+  waveformBar: {
+    width: 4,
+    borderRadius: 2,
+    backgroundColor: '#f0883e',
   },
   statusBar: {
     flexDirection: 'row',
