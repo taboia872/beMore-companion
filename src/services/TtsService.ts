@@ -91,35 +91,26 @@ function normalizeGeminiVoice(voice?: string): string {
 }
 
 /**
- * Adiciona um header WAV canônico a um PCM raw 16-bit 24kHz mono.
- * Retorna o conteúdo completo (header + data) como base64.
+ * Constrói um arquivo WAV completo (header + PCM) e salva no disco.
  *
  * Gemini TTS retorna audio/L16;rate=24000 — PCM 16-bit signed little-endian,
  * 24000 Hz, mono. Precisamos envolver em WAV para react-native-sound tocar.
+ *
+ * Em vez de manipular strings base64 (concatenação de base64 quebra por
+ * padding '='), escrevemos o header WAVdireto no arquivo com RNFS e então
+ * concatenamos o PCM decodificado em um segundo passo.
+ *
+ * @param pcmBase64 PCM 16-bit 24kHz mono em base64
+ * @param sampleRate Taxa de amostragem (default 24000 para Gemini)
+ * @returns Caminho do arquivo WAV criado
  */
-function pcm16ToWavBase64(pcmBase64: string, sampleRate = 24000): string {
-  // Decodifica base64 → bytes PCM. Usa atob via polyfill do RN.
-  // RN não tem atob nativo sem remote debugging, mas XHR responseType=base64
-  // já nos deu a string. Precisamos dos bytes brutos.
-  // Alternativa: manipular strings base64 diretamente (prepend do header
-  // WAV também em base64).
-
-  // Tamanho do PCM em bytes. base64 → bytes: cada 4 chars base64 = 3 bytes.
-  // Mas pode haver padding (=). Calculamos de forma segura.
+async function saveWavFile(pcmBase64: string, sampleRate = 24000): Promise<string> {
+  // Tamanho do PCM em bytes (base64 → bytes: 4 chars = 3 bytes, com padding).
   const cleanB64 = pcmBase64.replace(/=+$/, '');
   const pcmByteLength = Math.floor(cleanB64.length * 3 / 4);
 
-  // Header WAV = 44 bytes. Estrutura:
-  //   "RIFF" (4) + chunkSize (4) + "WAVE" (4)
-  //   "fmt " (4) + subchunk1Size (4) + audioFormat (2) + numChannels (2)
-  //   + sampleRate (4) + byteRate (4) + blockAlign (2) + bitsPerSample (2)
-  //   "data" (4) + subchunk2Size (4)
-  //   = 44 bytes total
+  // Header WAV = 44 bytes.
   const headerSize = 44;
-  const totalSize = headerSize + pcmByteLength;
-  const byteRate = sampleRate * 2; // 16-bit mono = 2 bytes/sample
-
-  // Constrói o header como um ArrayBuffer→Uint8Array.
   const header = new Uint8Array(headerSize);
   const dv = new DataView(header.buffer);
 
@@ -143,8 +134,8 @@ function pcm16ToWavBase64(pcmBase64: string, sampleRate = 24000): string {
   dv.setUint16(20, 1, true);    // audioFormat = 1 (PCM)
   dv.setUint16(22, 1, true);    // numChannels = 1 (mono)
   dv.setUint32(24, sampleRate, true);
-  dv.setUint32(28, byteRate, true);
-  dv.setUint16(32, 2, true);    // blockAlign = 2
+  dv.setUint32(28, sampleRate * 2, true); // byteRate
+  dv.setUint16(32, 2, true);    // blockAlign = 2 (16-bit mono)
   dv.setUint16(34, 16, true);   // bitsPerSample = 16
 
   // data sub-chunk
@@ -154,19 +145,23 @@ function pcm16ToWavBase64(pcmBase64: string, sampleRate = 24000): string {
   dv.setUint8(39, 0x61); // 'a'
   dv.setUint32(40, pcmByteLength, true);
 
-  // Converter header para base64. RN não tem btoa nativo, mas podemos
-  // usar uma implementação manual simples para 44 bytes.
+  // Converter header para base64 (44 bytes → 60 chars base64 com padding).
   const headerB64 = uint8ToBase64(header);
 
-  // Concatena header base64 + PCM base64.
-  // Ambos já estão em base64 — basta concatenar as strings.
-  // O resultado é um WAV completo em base64.
-  return headerB64 + pcmBase64;
+  const fileName = `tts_${Date.now()}.wav`;
+  const audioPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
+
+  // Escreve o header primeiro, depois anexa o PCM.
+  // RNFS.writeFile sobrescreve; RNFS.appendFile adiciona ao final.
+  await RNFS.writeFile(audioPath, headerB64, 'base64');
+  await RNFS.appendFile(audioPath, pcmBase64, 'base64');
+
+  return audioPath;
 }
 
 /**
- * Converte Uint8Array para string base64 (semdependência externa).
- * Implementação manual para 44 bytes — mais leve que importar uma lib.
+ * Converte Uint8Array para string base64.
+ * Implementação manual — leve para 44 bytes.
  */
 function uint8ToBase64(bytes: Uint8Array): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -276,23 +271,13 @@ export function speakText(params: TtsParams): Promise<void> {
       }
 
       // Sucesso — processar áudio.
-      let audioB64: string;
-      let fileExt: string;
+      try {
+        let audioPath: string;
 
-      if (gemini) {
-        // Gemini retorna JSON (não binário!) com o PCM base64 dentro de
-        // candidates[0].content.parts[0].inlineData.data.
-        //
-        // Problema: com responseType='base64', o RN codifica o body JSON
-        // inteiro em base64. Decodificar megabytes de base64 manualmente
-        // no JS é lento e propenso a bugs com caracteres multibyte.
-        //
-        // Solução: usar uma segunda XHR com responseType='text' para o
-        // Gemini, obtendo o JSON diretamente como string. O PCM base64
-        // dentro do JSON já está codificado — só precisamos extrair e
-        // envelopar em WAV.
-        try {
-          // responseType='text' → xhr.response é o JSON string.
+        if (gemini) {
+          // Gemini retorna JSON (responseType='text') com PCM base64
+          // dentro de candidates[0].content.parts[0].inlineData.data.
+          // O PCM é L16 24kHz mono — envelopamos em WAV e salvamos no disco.
           const jsonStr: string = (xhr.response as string) || xhr.responseText || '';
           if (!jsonStr) {
             reject(new Error('Gemini TTS retornou resposta vazia.'));
@@ -305,35 +290,27 @@ export function speakText(params: TtsParams): Promise<void> {
             reject(new Error('Gemini TTS respondeu sem áudio (inlineData.data vazio).'));
             return;
           }
-          // PCM L16 24kHz mono → WAV
-          audioB64 = pcm16ToWavBase64(pcmB64, 24000);
-          fileExt = 'wav';
-        } catch (e) {
-          reject(new Error('Erro ao processar resposta Gemini TTS: ' + (e as Error)?.message));
-          return;
+          // Constrói WAV (header + PCM) e salva no cacheDir.
+          audioPath = await saveWavFile(pcmB64, 24000);
+        } else {
+          // OpenAI-compat: resposta é MP3 binário em base64.
+          const mp3B64: string = xhr.response || '';
+          if (!mp3B64) {
+            reject(new Error('Servidor TTS retornou áudio vazio.'));
+            return;
+          }
+          const fileName = `tts_${Date.now()}.mp3`;
+          audioPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
+          await RNFS.writeFile(audioPath, mp3B64, 'base64');
         }
-      } else {
-        // OpenAI-compat: resposta é MP3 binário direto em base64.
-        audioB64 = xhr.response || '';
-        fileExt = 'mp3';
-      }
 
-      if (!audioB64) {
-        reject(new Error('Servidor TTS retornou áudio vazio.'));
-        return;
-      }
-
-      // Salvar no cacheDir e tocar.
-      try {
-        const fileName = `tts_${Date.now()}.${fileExt}`;
-        const audioPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
-        await RNFS.writeFile(audioPath, audioB64, 'base64');
+        // Tocar o arquivo.
         await playAudioFile(audioPath);
         // Limpar arquivo após tocar.
         try { await RNFS.unlink(audioPath); } catch { /* no-op */ }
         resolve();
       } catch (e) {
-        reject(new Error('Falha ao salvar/tocar áudio TTS.'));
+        reject(new Error('Falha ao salvar/tocar áudio TTS: ' + (e as Error)?.message));
       }
     };
 
