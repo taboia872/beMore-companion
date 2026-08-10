@@ -54,10 +54,9 @@ interface ServerPreset {
 }
 
 const SERVER_PRESETS: ServerPreset[] = [
-  {name: 'Google AI Studio', url: 'https://generativelanguage.googleapis.com/v1beta/openai/', icon: 'auto-awesome', hasFreeModels: true},
+  {name: 'Google AI Studio', url: 'https://generativelanguage.googleapis.com/v1beta', icon: 'auto-awesome', hasFreeModels: true},
   {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', icon: 'route', hasFreeModels: true},
   {name: 'Ollama Cloud', url: 'https://ollama.com/v1', icon: 'cloud-queue'},
-  {name: 'HuggingFace', url: 'https://router.huggingface.co/v1', icon: 'pets', hasFreeModels: true},
   {name: 'Groq', url: 'https://api.groq.com/openai/v1', icon: 'bolt', hasFreeModels: true},
   {name: 'NVIDIA', url: 'https://integrate.api.nvidia.com/v1', icon: 'memory', hasFreeModels: true},
   {name: 'AIHorde', url: 'https://oai.aihorde.net/v1', icon: 'groups', hasFreeModels: true},
@@ -70,17 +69,32 @@ interface CardProps {
   title: string;
   icon: string; // MaterialIconsIconName válido
   children: React.ReactNode;
+  /** Se true, começa expandido (default: false). */
+  defaultExpanded?: boolean;
 }
 
-/** Container visual p/ agrupar uma seção de configurações (item 6). */
-function Card({title, icon, children}: CardProps) {
+/**
+ * Container visual p/ agrupar uma seção de configurações (item 6).
+ * Agora com suporte a accordion: header clicável expande/colapsa o conteúdo.
+ */
+function Card({title, icon, children, defaultExpanded = false}: CardProps) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
   return (
     <View style={s.card}>
-      <View style={s.cardHeader}>
+      <TouchableOpacity
+        style={s.cardHeader}
+        activeOpacity={0.7}
+        onPress={() => setExpanded(v => !v)}>
         <Icon name={icon as any} size={18} color="#58a6ff" />
         <Text style={s.cardTitle}>{title}</Text>
-      </View>
-      {children}
+        <Icon
+          name={expanded ? 'expand-less' : 'expand-more'}
+          size={22}
+          color="#8b949e"
+          style={s.cardChevron}
+        />
+      </TouchableOpacity>
+      {expanded && <View style={s.cardBody}>{children}</View>}
     </View>
   );
 }
@@ -205,27 +219,30 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
       const baseUrl = draft.llm.baseUrl.replace(/\/+$/, '');
 
       // Cada servidor pode ter um endpoint diferente para listar modelos.
-      // AIHorde: endpoint é /v1/models (falta o /v1 no preset URL).
+      // Google AI Studio: API nativa v1beta/models com ?key=API_KEY (não Bearer)
       // OpenRouter: endpoint público com pricing info.
-      // Google AI Studio: endpoint v1beta/models.
-      // HuggingFace: API pública diferente.
-      // Demais: /models padrão OpenAI-compatível.
+      // Demais: /models padrão OpenAI-compatível (Bearer auth).
       let url: string;
+      let useQueryParamKey = false;
       if (baseUrl.includes('openrouter.ai')) {
         url = 'https://openrouter.ai/api/v1/models';
       } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-        url = 'https://generativelanguage.googleapis.com/v1beta/models';
-      } else if (baseUrl.includes('huggingface.co')) {
-        url = 'https://huggingface.co/api/models?inference=warm&limit=100';
+        url = `${baseUrl}/models`;
+        useQueryParamKey = true; // Gemini nativo usa ?key= em vez de Bearer
       } else {
         url = `${baseUrl}/models`;
       }
 
+      const headers: Record<string, string> = {};
+      if (draft.llm.apiKey && !useQueryParamKey) {
+        headers['Authorization'] = `Bearer ${draft.llm.apiKey}`;
+      }
+      if (useQueryParamKey && draft.llm.apiKey) {
+        url = `${url}?key=${encodeURIComponent(draft.llm.apiKey)}`;
+      }
       const response = await fetch(url, {
         method: 'GET',
-        headers: {
-          ...(draft.llm.apiKey && {Authorization: `Bearer ${draft.llm.apiKey}`}),
-        },
+        headers,
       });
       if (!response.ok) {
         const errText = await response.text();
@@ -334,14 +351,14 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
       <ScrollView contentContainerStyle={s.container}>
         {/* Card: Provedor + dados conforme tipo (item 6 — agrupado) */}
-        <Card title="Modelo de Linguagem" icon="memory">
+        <Card title="Modelo de Linguagem" icon="memory" defaultExpanded={true}>
           {/* Tabs Online / Local — texto encurtado (item 6) */}
           <View style={s.row}>
             <TouchableOpacity
               style={[s.tab, draft.llm.provider === 'localhost' && s.tabActive]}
               onPress={() => updateLlm({provider: 'localhost' as LlmProvider})}>
               <Icon
-                name="dns"
+                name="cloud-queue"
                 size={18}
                 color={draft.llm.provider === 'localhost' ? '#fff' : '#8b949e'}
               />
@@ -467,7 +484,6 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     autoCorrect={false}
                     onChangeText={v => updateLlm({baseUrl: v})}
                   />
-                  <Text style={s.hint}>Ollama, LM Studio, llama.cpp server, etc.</Text>
                 </>
               )}
 
@@ -535,26 +551,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           )}
         </Card>
 
-        {/* Card: Voz (STT) — toggle on-device/online */}
+        {/* Card: Voz (STT) — toggle online/on-device */}
         <Card title="Voz (STT)" icon="mic">
-          {/* Toggle: On-device ↔ Online */}
+          {/* Toggle: Online ↔ On-device (Online à esquerda, On-device à direita) */}
           <View style={s.row}>
-            <TouchableOpacity
-              style={[s.tab, (draft.sttMode ?? 'on-device') === 'on-device' && s.tabActive]}
-              onPress={() => setDraft({...draft, sttMode: 'on-device'})}>
-              <Icon
-                name="smartphone"
-                size={18}
-                color={(draft.sttMode ?? 'on-device') === 'on-device' ? '#fff' : '#8b949e'}
-              />
-              <Text
-                style={[
-                  s.tabText,
-                  (draft.sttMode ?? 'on-device') === 'on-device' && s.tabTextActive,
-                ]}>
-                On-device
-              </Text>
-            </TouchableOpacity>
             <TouchableOpacity
               style={[s.tab, draft.sttMode === 'online' && s.tabActive]}
               onPress={() => setDraft({...draft, sttMode: 'online'})}>
@@ -569,6 +569,22 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   draft.sttMode === 'online' && s.tabTextActive,
                 ]}>
                 Online
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.tab, (draft.sttMode ?? 'on-device') === 'on-device' && s.tabActive]}
+              onPress={() => setDraft({...draft, sttMode: 'on-device'})}>
+              <Icon
+                name="smartphone"
+                size={18}
+                color={(draft.sttMode ?? 'on-device') === 'on-device' ? '#fff' : '#8b949e'}
+              />
+              <Text
+                style={[
+                  s.tabText,
+                  (draft.sttMode ?? 'on-device') === 'on-device' && s.tabTextActive,
+                ]}>
+                On-device
               </Text>
             </TouchableOpacity>
           </View>
@@ -620,23 +636,28 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     try {
                       const baseUrl = (draft.sttServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
                       let url: string;
+                      let useQueryParamKey = false;
                       if (baseUrl.includes('openrouter.ai')) {
                         url = 'https://openrouter.ai/api/v1/models';
                       } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-                        url = 'https://generativelanguage.googleapis.com/v1beta/models';
-                      } else if (baseUrl.includes('huggingface.co')) {
-                        url = 'https://huggingface.co/api/models?inference=warm&limit=100';
+                        url = `${baseUrl}/models`;
+                        useQueryParamKey = true;
                       } else {
                         url = `${baseUrl}/models`;
                       }
                       const apiKey = draft.sttServerOverride?.trim()
                         ? await loadApiKeyForServer(draft.sttServerOverride.trim())
                         : draft.llm.apiKey ?? '';
+                      const headers: Record<string, string> = {};
+                      if (apiKey && !useQueryParamKey) {
+                        headers['Authorization'] = `Bearer ${apiKey}`;
+                      }
+                      if (useQueryParamKey && apiKey) {
+                        url = `${url}?key=${encodeURIComponent(apiKey)}`;
+                      }
                       const response = await fetch(url, {
                         method: 'GET',
-                        headers: {
-                          ...(apiKey && {Authorization: `Bearer ${apiKey}`}),
-                        },
+                        headers,
                       });
                       if (!response.ok) {
                         const errText = await response.text();
@@ -699,8 +720,19 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           )}
         </Card>
 
-        {/* Card: Prompt do Sistema — item 6 container próprio */}
-        <Card title="Prompt do Sistema" icon="edit">
+        {/* Card: Voz (TTS) — placeholder informativo (implementação futura) */}
+        <Card title="Voz (TTS)" icon="volume-up">
+          <Text style={s.hint}>
+            Síntese de voz (TTS) será implementada em breve. O app usará um
+            modelo online (ex: Groq TTS, OpenAI TTS) para converter respostas
+            de texto em áudio.
+          </Text>
+        </Card>
+
+        {/* Card: Misc — agrupa Prompt do Sistema + Streaming de Respostas */}
+        <Card title="Misc" icon="settings">
+          {/* Sub-seção: Prompt do Sistema */}
+          <Text style={[s.subSectionTitle, {marginTop: 0}]}>Prompt do Sistema</Text>
           <TextInput
             style={[s.input, s.textarea]}
             value={draft.systemPrompt}
@@ -712,10 +744,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             Instruções base que definem o comportamento do assistant. Aplicadas ao
             início de toda conversa.
           </Text>
-        </Card>
 
-        {/* Card: Streaming — toggle persistente de respostas em tempo real */}
-        <Card title="Streaming de Respostas" icon="stream">
+          {/* Sub-seção: Streaming de Respostas */}
+          <Text style={s.subSectionTitle}>Streaming de Respostas</Text>
           <TouchableOpacity
             style={s.toggleRow}
             onPress={() =>
@@ -920,7 +951,20 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 12,
+    marginBottom: 0,
+  },
+  cardChevron: {
+    marginLeft: 'auto',
+  },
+  cardBody: {
+    marginTop: 12,
+  },
+  subSectionTitle: {
+    color: '#e6edf3',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 14,
+    marginBottom: 6,
   },
   cardTitle: {
     color: '#e6edf3',

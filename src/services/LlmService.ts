@@ -133,6 +133,24 @@ function isLocalServer(baseUrl: string): boolean {
   );
 }
 
+/**
+ * Ajusta a URL base para o endpoint de chat/completions.
+ *
+ * Google AI Studio (Gemini) tem endpoint OpenAI-compatível em
+ * /v1beta/openai/chat/completions (precisa do /openai extra).
+ * Quando o usuário seleciona o preset "Google AI Studio", a baseUrl
+ * é https://generativelanguage.googleapis.com/v1beta — sem /openai.
+ * Precisamos injetar /openai antes de /chat/completions.
+ */
+function buildChatUrl(baseUrl: string): string {
+  const clean = baseUrl.replace(/\/+$/, '');
+  // Gemini: injeta /openai antes de /chat/completions
+  if (clean.includes('generativelanguage.googleapis.com')) {
+    return `${clean}/openai/chat/completions`;
+  }
+  return `${clean}/chat/completions`;
+}
+
 export function createThinkingParser(onEvent: StreamCallback) {
   // Pares de tags suportados, ordenados para que prefixes mais longos
   // sejam testados primeiro (evita mismatches parciais). Modelos locais
@@ -361,7 +379,7 @@ function fetchBatch(
       resolve();
     };
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const url = buildChatUrl(config.baseUrl);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     xhr.responseType = 'text';
@@ -459,7 +477,7 @@ function streamNetwork(
       return;
     }
 
-    const url = `${config.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const url = buildChatUrl(config.baseUrl);
     // reasoning_format: 'parsed' pede ao servidor para separar o raciocínio
     // em um campo dedicado (reasoning_content/reasoning) em vez de inline
     // no `content` com tags. Suportado por Groq, OpenRouter e vLLM.

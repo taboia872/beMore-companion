@@ -659,7 +659,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
                   {text}
                 </Text>
               ) : (
-                <Markdown style={mdStyle}>{text}</Markdown>
+                <Markdown style={mdStyle} rules={markdownRules}>
+                  {text}
+                </Markdown>
               );
             })()}
           </>
@@ -940,6 +942,28 @@ const mdStyle = StyleSheet.create({
   text: {color: '#e6edf3'},
 });
 
+// Regras customizadas de renderização do Markdown.
+// Substitui o renderizador padrão de `fence` (code blocks com fences ```),
+// que depende do prism-react-renderer + MaterialDesignIcons — pesado e
+// suscetível a falhas de layout (a View pai perde overflow/estilos quando
+// o user style sobrescreve fence). Aqui usamos um ScrollView horizontal
+// simples com Text monoespaçado — robusto e consistente com o dark theme.
+//
+// Assinatura do RenderRule (v9): (node, children, parentNodes, styles, ...extra) => ReactNode
+//   node.content traz o código bruto da fence.
+//   node.key é obrigatório como key do elemento raiz (animações/reconciliação).
+const markdownRules = {
+  fence: (node: any, _children: any, _parentNodes: any, _styles: any) => (
+    <ScrollView
+      key={node.key}
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={{marginVertical: 8}}>
+      <Text style={mdStyle.fence}>{node.content}</Text>
+    </ScrollView>
+  ),
+};
+
 const s = StyleSheet.create({
   safe: {
     flex: 1,
@@ -972,7 +996,13 @@ const s = StyleSheet.create({
   },
   bubble: {
     maxWidth: '85%',
+    // Largura fixa em ~85% para bubbles consistentes (evita que mensagens
+    // curtas fiquem estreitas demais). Compatibilidade dark/light.
+    width: '85%',
     padding: 12,
+    // Espaço extra no rodapé para evitar que o conteúdo (Markdown longo)
+    // se sobreponha ao actionBar (copy/regenerate/delete) logo abaixo.
+    paddingBottom: 6,
     borderRadius: 12,
     marginBottom: 8,
   },
