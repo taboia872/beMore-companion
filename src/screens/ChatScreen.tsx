@@ -33,6 +33,8 @@ import {displayModelName} from '../utils/modelName';
 import {getTextContent, getImageUrls, hasImages} from '../utils/messageContent';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
+import {speakText, stopSpeaking} from '../services/TtsService';
+import {loadApiKeyForServer} from '../data/appSettings';
 
 // Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -153,9 +155,17 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   const [imageModalUrl, setImageModalUrl] = useState<string | null>(null);
   // Controla o bottom sheet visual para escolher origem da imagem (Android).
   const [showPickerSheet, setShowPickerSheet] = useState(false);
+  // Auto-play TTS: liga/desliga em runtime pelo botão na header.
+  //Inicialmente segue settings.ttsAutoPlay.
+  const [ttsAuto, setTtsAuto] = useState(settings.ttsAutoPlay ?? false);
+  // Id da mensagem sendo sintetizada (para feedback visual no botão).
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
+  // Ref para acessar messages no callback de streamResponse sem stale closure.
+  const messagesRef = useRef<Message[]>(messages);
+  messagesRef.current = messages;
 
   const recorder = useRecorder();
   const whisper = useWhisper();
@@ -272,6 +282,18 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             break;
           case 'done':
             updateAssistant({status: 'done'});
+            // Auto-play TTS se ativado e modelo TTS configurado.
+            if (ttsAuto && settings.ttsOnlineModel?.trim()) {
+              const assistantId = assistantIdRef.current;
+              const finalMsg = messagesRef.current.find(m => m.id === assistantId);
+              if (finalMsg) {
+                const text = getTextContent(finalMsg);
+                if (text.trim()) {
+                  // Dispara sem await — não bloqueia o fluxo do chat.
+                  speakMessage(finalMsg);
+                }
+              }
+            }
             break;
           case 'error':
             updateAssistant({
@@ -591,6 +613,50 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     if (text.trim()) Clipboard.setString(text);
   };
 
+  // --- TTS: sintetizar e tocar a mensagem do assistant ---
+  const speakMessage = async (msg: Message) => {
+    // Se já está tocando esta mensagem, para.
+    if (speakingId && speakingId === msg.id) {
+      stopSpeaking();
+      setSpeakingId(null);
+      return;
+    }
+    const text = getTextContent(msg);
+    if (!text.trim()) return;
+
+    const ttsModel = settings.ttsOnlineModel ?? '';
+    if (!ttsModel) {
+      Alert.alert('TTS não configurado', 'Selecione um modelo TTS nas configurações.');
+      return;
+    }
+
+    // Determina baseUrl e apiKey (override ou reutiliza LLM).
+    let baseUrl: string;
+    let apiKey: string;
+    if (settings.ttsServerOverride?.trim()) {
+      baseUrl = settings.ttsServerOverride.trim();
+      apiKey = await loadApiKeyForServer(baseUrl);
+    } else {
+      baseUrl = settings.llm.baseUrl;
+      apiKey = settings.llm.apiKey ?? '';
+    }
+
+    setSpeakingId(msg.id ?? null);
+    try {
+      await speakText({
+        baseUrl,
+        apiKey,
+        model: ttsModel,
+        input: text,
+        voice: settings.ttsVoice,
+      });
+    } catch (e) {
+      Alert.alert('TTS falhou', (e as Error)?.message ?? String(e));
+    } finally {
+      setSpeakingId(null);
+    }
+  };
+
   const regenerateMessage = (msg: Message) => {
     // Encontra a msg do user imediatamente antes desta resposta do assistant.
     const idx = messages.findIndex(m => m.id === msg.id);
@@ -743,6 +809,19 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
               hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
               <Icon name="content-copy" size={15} color="#8b949e" />
             </TouchableOpacity>
+            {/* TTS: botão de alto-falante (só para mensagens do assistant). */}
+            {!isUser && (
+              <TouchableOpacity
+                style={s.actionBarItem}
+                onPress={() => speakMessage(item)}
+                hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                <Icon
+                  name={speakingId === item.id ? 'stop' : 'volume-up'}
+                  size={15}
+                  color={speakingId === item.id ? '#2dd4bf' : '#8b949e'}
+                />
+              </TouchableOpacity>
+            )}
             {!isUser && (
               <TouchableOpacity
                 style={s.actionBarItem}
@@ -778,9 +857,29 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         <Text style={s.headerTitle} numberOfLines={1}>
           {headerTitle}
         </Text>
-        <TouchableOpacity onPress={onOpenSettings} style={s.iconBtn}>
-          <Icon name="settings" size={24} color="#8b949e" />
-        </TouchableOpacity>
+        <View style={s.headerActions}>
+          {/* Auto-play TTS toggle — ativa reprodução automática das respostas */}
+          <TouchableOpacity
+            onPress={() => {
+              const next = !ttsAuto;
+              setTtsAuto(next);
+              if (!next) {
+                stopSpeaking();
+                setSpeakingId(null);
+              }
+            }}
+            style={s.iconBtn}>
+            <Icon
+              name={ttsAuto ? 'record-voice-over' : 'voice-over-off'}
+              size={24}
+              color={ttsAuto ? '#2dd4bf' : '#8b949e'}
+            />
+          </TouchableOpacity>
+          {/* Configurações */}
+          <TouchableOpacity onPress={onOpenSettings} style={s.iconBtn}>
+            <Icon name="settings" size={24} color="#8b949e" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Area de mensagens — KeyboardAvoidingView ajusta p/ teclado */}
@@ -1063,6 +1162,11 @@ const s = StyleSheet.create({
   },
   iconBtn: {
     padding: 4,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   list: {
     padding: 16,

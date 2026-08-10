@@ -107,6 +107,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   // Quando true, o modal de modelos está selecionando modelo STT (não LLM).
   const [sttPickerMode, setSttPickerMode] = useState(false);
+  const [ttsPickerMode, setTtsPickerMode] = useState(false);
   const [showModelsModal, setShowModelsModal] = useState(false);
   // Filtro de modelos no modal: 'all' | 'free' | 'stt' | 'tts'
   const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'stt' | 'tts'>('all');
@@ -216,6 +217,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     setFetchingModels(true);
     setModelFilter('all'); // reset filtro ao buscar novos modelos
     setSttPickerMode(false); // busca de modelos LLM, não STT
+    setTtsPickerMode(false); // nem TTS
     try {
       const baseUrl = draft.llm.baseUrl.replace(/\/+$/, '');
 
@@ -276,13 +278,16 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   };
 
   const pickModel = (id: string) => {
-    if (sttPickerMode) {
+    if (ttsPickerMode) {
+      setDraft({...draft, ttsOnlineModel: id});
+    } else if (sttPickerMode) {
       setDraft({...draft, sttOnlineModel: id});
     } else {
       updateLlm({model: id});
     }
     setShowModelsModal(false);
     setSttPickerMode(false);
+    setTtsPickerMode(false);
   };
 
   /**
@@ -317,6 +322,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     if (modelFilter === 'all') {
       // No modo STT picker, "Todos" mostra só modelos STT (pré-filtro)
       if (sttPickerMode) return hasCapability(id, 'stt');
+      // No modo TTS picker, "Todos" mostra só modelos TTS (pré-filtro)
+      if (ttsPickerMode) return hasCapability(id, 'tts');
       return true;
     }
     if (modelFilter === 'free') return isFreeModel(id);
@@ -731,12 +738,129 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           )}
         </Card>
 
-        {/* Card: Voz (TTS) — placeholder informativo (implementação futura) */}
+        {/* Card: Voz (TTS) — síntese de áudio via API online */}
         <Card title="Voz (TTS)" icon="volume-up">
           <Text style={s.hint}>
-            Síntese de voz (TTS) será implementada em breve. O app usará um
-            modelo online (ex: Groq TTS, OpenAI TTS) para converter respostas
-            de texto em áudio.
+            Síntese de voz via API online (Groq TTS, OpenAI TTS, etc). Usa o
+            modelo selecionado abaixo com o servidor atual{draft.ttsServerOverride?.trim() ? ' (override)' : ''}.
+          </Text>
+          <Text style={s.label}>Modelo TTS</Text>
+          <View style={s.modelRow}>
+            <TextInput
+              style={[s.input, s.modelInput]}
+              value={draft.ttsOnlineModel ?? ''}
+              placeholder="tts-1, tts-1-hd, etc"
+              placeholderTextColor="#aab2bc"
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={v => setDraft({...draft, ttsOnlineModel: v})}
+            />
+            <TouchableOpacity
+              style={s.fetchBtn}
+              onPress={async () => {
+                if (!draft.llm.baseUrl?.trim() && !draft.ttsServerOverride?.trim()) {
+                  Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
+                  return;
+                }
+                setFetchingModels(true);
+                setModelFilter('all');
+                try {
+                  const baseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
+                  let url: string;
+                  let useQueryParamKey = false;
+                  if (baseUrl.includes('openrouter.ai')) {
+                    url = 'https://openrouter.ai/api/v1/models';
+                  } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
+                    url = `${baseUrl}/models`;
+                    useQueryParamKey = true;
+                  } else {
+                    url = `${baseUrl}/models`;
+                  }
+                  const apiKey = draft.ttsServerOverride?.trim()
+                    ? await loadApiKeyForServer(draft.ttsServerOverride.trim())
+                    : draft.llm.apiKey ?? '';
+                  const headers: Record<string, string> = {};
+                  if (apiKey && !useQueryParamKey) {
+                    headers['Authorization'] = `Bearer ${apiKey}`;
+                  }
+                  if (useQueryParamKey && apiKey) {
+                    url = `${url}?key=${encodeURIComponent(apiKey)}`;
+                  }
+                  const response = await fetch(url, {method: 'GET', headers});
+                  if (!response.ok) {
+                    const errText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
+                  }
+                  const data = await response.json();
+                  const models: RemoteModel[] = data?.data ?? data?.models ?? [];
+                  const ids = models
+                    .map(m => {
+                      const raw = m.id ?? m.name ?? '';
+                      if (typeof raw !== 'string') return '';
+                      return raw.replace(/^models\//, '');
+                    })
+                    .filter((id): id is string => id.length > 0);
+                  if (ids.length === 0) {
+                    Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
+                    return;
+                  }
+                  ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+                  setAvailableModels(ids);
+                  setTtsPickerMode(true);
+                  setShowModelsModal(true);
+                } catch (e) {
+                  Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
+                } finally {
+                  setFetchingModels(false);
+                }
+              }}
+              disabled={fetchingModels}>
+              {fetchingModels ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Icon name="search" size={20} color="#fff" />
+              )}
+            </TouchableOpacity>
+          </View>
+          {draft.ttsOnlineModel?.trim() && (
+            <View style={s.sttModelSelected}>
+              <Icon name="check-circle" size={14} color="#2dd4bf" />
+              <Text style={s.sttModelSelectedText}>
+                {draft.ttsOnlineModel}
+              </Text>
+            </View>
+          )}
+
+          {/* Voz (dropdown simples) */}
+          <Text style={s.label}>Voz</Text>
+          <TextInput
+            style={s.input}
+            value={draft.ttsVoice ?? ''}
+            placeholder="alloy, nova, shimmer, echo, fable, onyx"
+            placeholderTextColor="#aab2bc"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={v => setDraft({...draft, ttsVoice: v})}
+          />
+          <Text style={s.hint}>
+            Vozes podem variar por provedor. OpenAI/Groq: alloy, nova, shimmer,
+            echo, fable, onyx. Deixe vazio para usar o padrão (alloy).
+          </Text>
+
+          {/* Override de servidor TTS (opcional) */}
+          <Text style={s.label}>Servidor TTS (opcional)</Text>
+          <TextInput
+            style={s.input}
+            value={draft.ttsServerOverride ?? ''}
+            placeholder="Deixe vazio para usar o mesmo do chat"
+            placeholderTextColor="#aab2bc"
+            autoCapitalize="none"
+            autoCorrect={false}
+            onChangeText={v => setDraft({...draft, ttsServerOverride: v})}
+          />
+          <Text style={s.hint}>
+            Por padrão usa a URL+API Key do servidor de chat. Preencha
+            para usar um servidor diferente só para TTS.
           </Text>
         </Card>
 
@@ -792,7 +916,11 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           <View style={s.modalCard}>
             <View style={s.modalHeader}>
               <Text style={s.modalTitle}>
-                {sttPickerMode ? 'Modelos STT disponíveis' : 'Modelos disponíveis'}
+                {ttsPickerMode
+                  ? 'Modelos TTS disponíveis'
+                  : sttPickerMode
+                  ? 'Modelos STT disponíveis'
+                  : 'Modelos disponíveis'}
               </Text>
               <TouchableOpacity onPress={() => setShowModelsModal(false)} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
                 <Icon name="close" size={22} color="#8b949e" />
@@ -885,7 +1013,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                         <Text style={s.freeBadgeText}>FREE</Text>
                       </View>
                     )}
-                    {item === (sttPickerMode ? draft.sttOnlineModel : draft.llm.model) && (
+                    {item === (ttsPickerMode ? draft.ttsOnlineModel : sttPickerMode ? draft.sttOnlineModel : draft.llm.model) && (
                       <Icon name="check" size={20} color="#3fb950" />
                     )}
                   </TouchableOpacity>

@@ -48,6 +48,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   sttModelPath: '',
   sttOnlineModel: '',
   sttServerOverride: '',
+  ttsOnlineModel: '',
+  ttsServerOverride: '',
+  ttsVoice: 'alloy',
+  ttsAutoPlay: false,
   streamingEnabled: true,
 };
 

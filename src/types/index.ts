@@ -88,6 +88,28 @@ export interface AppSettings {
    */
   sttServerOverride?: string;
   /**
+   * Nome do modelo para TTS online (ex: 'tts-1', 'tts-1-hd').
+   * Se vazio, TTS fica indisponível.
+   */
+  ttsOnlineModel?: string;
+  /**
+   * Override opcional de servidor para TTS online.
+   * Se vazio, reutiliza baseUrl+apiKey do servidor LLM atual.
+   * Se preenchido, usa esta URL (com apiKey do Keychain para este hostname).
+   */
+  ttsServerOverride?: string;
+  /**
+   * Voz para TTS (ex: 'alloy', 'nova', 'shimmer', 'echo', 'fable', 'onyx').
+   * O padrão depende do provedor. OpenAI/Groq usam estes nomes.
+   */
+  ttsVoice?: string;
+  /**
+   * Se true, toca automaticamente o áudio TTS da resposta do assistant
+   * assim que a geração termina. O usuário pode ativar/desativar pelo
+   * botão na header do chat.
+   */
+  ttsAutoPlay?: boolean;
+  /**
    * Habilita/desabilita o streaming de respostas da IA. Quando true (padrão),
    * tokens aparecem em tempo real conforme chegam (via SSE). Quando false, a
    * resposta completa é aguardada em uma única requisição sem stream — útil
