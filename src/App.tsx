@@ -4,6 +4,7 @@ import {AppSettings, Message} from './types';
 import {loadSettings} from './data/appSettings';
 import {ChatScreen} from './screens/ChatScreen';
 import {SettingsScreen} from './screens/SettingsScreen';
+import {getTheme} from './utils/theme';
 
 export default function App() {
   // 'settings' vira overlay — ChatScreen permanece MONTADO por baixo, então
@@ -45,11 +46,13 @@ export default function App() {
     return <View style={{flex: 1, backgroundColor: '#0d1117'}} />;
   }
 
+  const appTheme = getTheme(settings.theme);
+
   return (
-    <View style={{flex: 1, backgroundColor: '#0d1117'}}>
+    <View style={{flex: 1, backgroundColor: appTheme.bg}}>
       <StatusBar
-        backgroundColor="#0d1117"
-        barStyle="light-content"
+        backgroundColor={appTheme.bg}
+        barStyle={appTheme.statusBar}
         translucent={false}
       />
       {/* Chat SEMPRE montado — estado persiste entre overlay abas. */}

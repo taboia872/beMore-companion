@@ -62,9 +62,13 @@ export interface Message {
   status?: MessageStatus;
 }
 
+export type AppTheme = 'dark' | 'light';
+
 export interface AppSettings {
   systemPrompt: string;
   llm: LlmConfig;
+  /** Tema da interface: 'dark' (padrão) ou 'light'. */
+  theme?: AppTheme;
   /**
    * Modo de transcrição de voz (STT):
    * - 'on-device': usa whisper.rn com modelo GGUF local (sttModelPath)

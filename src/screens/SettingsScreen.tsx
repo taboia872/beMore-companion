@@ -892,6 +892,35 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             início de toda conversa.
           </Text>
 
+          {/* Sub-seção: Tema da Interface */}
+          <Text style={s.subSectionTitle}>Tema da Interface</Text>
+          <View style={{flexDirection: 'row', gap: 8, marginBottom: 6}}>
+            <TouchableOpacity
+              style={[
+                s.themeOption,
+                (draft.theme ?? 'dark') === 'dark' && s.themeOptionActive,
+              ]}
+              onPress={() => setDraft(d => ({...d, theme: 'dark'}))}>
+              <Icon name="dark-mode" size={20} color={(draft.theme ?? 'dark') === 'dark' ? '#58a6ff' : '#8b949e'} />
+              <Text style={[
+                s.themeOptionLabel,
+                (draft.theme ?? 'dark') === 'dark' && s.themeOptionLabelActive,
+              ]}>Escuro</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                s.themeOption,
+                draft.theme === 'light' && s.themeOptionActive,
+              ]}
+              onPress={() => setDraft(d => ({...d, theme: 'light'}))}>
+              <Icon name="light-mode" size={20} color={draft.theme === 'light' ? '#58a6ff' : '#8b949e'} />
+              <Text style={[
+                s.themeOptionLabel,
+                draft.theme === 'light' && s.themeOptionLabelActive,
+              ]}>Claro</Text>
+            </TouchableOpacity>
+          </View>
+
           {/* Sub-seção: Streaming de Respostas */}
           <Text style={s.subSectionTitle}>Streaming de Respostas</Text>
           <TouchableOpacity
@@ -1249,6 +1278,31 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   toggleLabel: {color: '#e6edf3', fontSize: 15, flex: 1, paddingRight: 12},
+  /* Theme selector options */
+  themeOption: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: 10,
+    backgroundColor: '#0d1117',
+    borderWidth: 1,
+    borderColor: '#21262d',
+  },
+  themeOptionActive: {
+    borderColor: '#58a6ff',
+    backgroundColor: '#161b22',
+  },
+  themeOptionLabel: {
+    color: '#8b949e',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  themeOptionLabelActive: {
+    color: '#58a6ff',
+  },
   saveBtn: {
     flexDirection: 'row',
     alignItems: 'center',

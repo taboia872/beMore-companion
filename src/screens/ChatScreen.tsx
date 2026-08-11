@@ -35,6 +35,8 @@ import Markdown from '@ronradtke/react-native-markdown-display';
 import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
 import {speakText, stopSpeaking} from '../services/TtsService';
 import {loadApiKeyForServer} from '../data/appSettings';
+import {getTheme} from '../utils/theme';
+import type {ThemeColors} from '../utils/theme';
 
 // Habilita LayoutAnimation p/ animar expansão/colapso do thinking no Android.
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -52,13 +54,18 @@ function TypingDots() {
     return () => clearInterval(interval);
   }, []);
   return (
-    <View style={s.typingDots}>
+    <View style={{flexDirection: 'row', gap: 3, marginLeft: 2}}>
       {[0, 1, 2].map(i => (
         <View
           key={i}
           style={[
-            s.typingDot,
-            active === i && s.typingDotActive,
+            {
+              width: 5,
+              height: 5,
+              borderRadius: 3,
+              backgroundColor: '#30363d',
+            },
+            active === i && {backgroundColor: '#58a6ff'},
           ]}
         />
       ))}
@@ -118,12 +125,16 @@ function WaveformAnimation() {
   }, []);
 
   return (
-    <View style={s.waveformContainer}>
+    <View style={{flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3, height: 30}}>
       {bars.map((bar, i) => (
         <Animated.View
           key={i}
           style={[
-            s.waveformBar,
+            {
+              width: 4,
+              borderRadius: 2,
+              backgroundColor: '#f0883e',
+            },
             {height: bar},
           ]}
         />
@@ -140,6 +151,10 @@ interface Props {
 }
 
 export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
+  const theme = getTheme(settings.theme);
+  const s = getStyles(theme);
+  const mdStyle = getMdStyle(theme);
+  const markdownRules = createMarkdownRules(theme);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   // Modo thinking local ao chat — inicia DESLIGADO. Sem persistir em
@@ -160,6 +175,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   const [ttsAuto, setTtsAuto] = useState(settings.ttsAutoPlay ?? false);
   // Id da mensagem sendo sintetizada (para feedback visual no botão).
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  // Se o usuário está no final da lista (longe do topo = scroll ativo).
+  // Usado para: mostrar/esconder botão "rolar para baixo" e decidir
+  // se auto-scroll durante streaming é apropriado.
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  // Se o conteúdo da lista é maior que o viewport (há o que rolar).
+  const [hasScrollableContent, setHasScrollableContent] = useState(false);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -172,11 +193,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
 
   useEffect(() => {
     // Pequeno delay p/ garantir que o layout foi atualizado antes do scroll.
+    // SÓ rola se o usuário já estiver no bottom — se está lendo mensagens
+    // antigas (scrollou para cima), não puxa de volta pra o final.
+    if (!isAtBottom) return;
     const timer = setTimeout(() => {
       listRef.current?.scrollToEnd({animated: false});
     }, 50);
     return () => clearTimeout(timer);
-  }, [messages]);
+  }, [messages, isAtBottom]);
 
   const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
@@ -241,6 +265,22 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     setPendingImages([]);
     setStreaming(true);
     assistantIdRef.current = assistantId;
+
+    // Alinhamento de nova mensagem ao topo (item 9 da lista de tasks).
+    // Se há conteúdo scrollável (a conversa já preenche a tela), alinha
+    // a nova pergunta do user ao TOPO do espaço visível. Se o conteúdo
+    // ainda cabe na viewport (início da conversa, sem scroll ativo),
+    // não faz nada — o useEffect de messages cuida do scrollToEnd.
+    const userMsgIndex = newMsgs.length - 2; // penúltima = userMsg
+    setTimeout(() => {
+      if (hasScrollableContent) {
+        listRef.current?.scrollToIndex({
+          index: userMsgIndex,
+          viewPosition: 0,  // 0 = alinha ao topo
+          animated: true,
+        });
+      }
+    }, 60);
 
     const updateAssistant = (
       patchOrUpdater: Partial<Message> | ((prev: Message) => Partial<Message>),
@@ -562,14 +602,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     if (streaming) {
       return (
         <TouchableOpacity style={[s.actionBtn, s.actionBtnStop]} onPress={stopGeneration}>
-          <Icon name="stop" size={22} color="#fff" />
+          <Icon name="stop" size={22} color={theme.accentText} />
         </TouchableOpacity>
       );
     }
     if (input.trim().length > 0 || pendingImages.length > 0) {
       return (
         <TouchableOpacity style={s.actionBtn} onPress={() => send()}>
-          <Icon name="send" size={20} color="#fff" />
+          <Icon name="send" size={20} color={theme.accentText} />
         </TouchableOpacity>
       );
     }
@@ -590,8 +630,8 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             recorder.status === 'recording'
               ? '#fff'
               : recorder.status === 'error'
-                ? '#f85149'
-                : '#8b949e'
+                ? theme.errorText
+                : theme.textSecondary
           }
         />
       </TouchableOpacity>
@@ -741,7 +781,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         {/* status de geração — feedback de "pensando" */}
         {statusLabel && (
           <View style={s.statusRow}>
-            <ActivityIndicator size="small" color="#58a6ff" />
+            <ActivityIndicator size="small" color={theme.accent} />
             <Text style={s.statusText}>{statusLabel}</Text>
             <TypingDots />
           </View>
@@ -755,7 +795,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             <Icon
               name={expanded ? 'expand-less' : 'expand-more'}
               size={16}
-              color="#8b949e"
+              color={theme.textSecondary}
             />
             <Text style={s.thinkingToggleLabel}>
               {expanded ? 'Ocultar pensamento' : 'Ver pensamento'}
@@ -811,7 +851,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
               style={s.actionBarItem}
               onPress={() => copyMessage(item)}
               hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-              <Icon name="content-copy" size={15} color="#8b949e" />
+              <Icon name="content-copy" size={15} color={theme.textSecondary} />
             </TouchableOpacity>
             {/* TTS: botão de alto-falante (só para mensagens do assistant). */}
             {!isUser && (
@@ -822,7 +862,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
                 <Icon
                   name={speakingId === item.id ? 'stop' : 'volume-up'}
                   size={15}
-                  color={speakingId === item.id ? '#2dd4bf' : '#8b949e'}
+                  color={speakingId === item.id ? '#2dd4bf' : theme.textSecondary}
                 />
               </TouchableOpacity>
             )}
@@ -831,14 +871,14 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
                 style={s.actionBarItem}
                 onPress={() => regenerateMessage(item)}
                 hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-                <Icon name="refresh" size={15} color="#8b949e" />
+                <Icon name="refresh" size={15} color={theme.textSecondary} />
               </TouchableOpacity>
             )}
             <TouchableOpacity
               style={s.actionBarItem}
               onPress={() => deleteMessage(item)}
               hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-              <Icon name="delete-outline" size={15} color="#8b949e" />
+              <Icon name="delete-outline" size={15} color={theme.textSecondary} />
             </TouchableOpacity>
           </View>
         )}
@@ -851,8 +891,8 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar
-        backgroundColor="#0d1117"
-        barStyle="light-content"
+        backgroundColor={theme.bg}
+        barStyle={theme.statusBar}
         translucent={false}
       />
 
@@ -862,6 +902,22 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           {headerTitle}
         </Text>
         <View style={s.headerActions}>
+          {/* Novo chat — limpa histórico e contexto atual */}
+          <TouchableOpacity
+            onPress={() => {
+              if (messages.length === 0) return;
+              Alert.alert(
+                'Novo Chat',
+                'Limpar todo o histórico de mensagens?',
+                [
+                  {text: 'Cancelar', style: 'cancel'},
+                  {text: 'Limpar', onPress: () => setMessages(() => []), style: 'destructive'},
+                ],
+              );
+            }}
+            style={s.iconBtn}>
+            <Icon name="add-comment" size={24} color={theme.textSecondary} />
+          </TouchableOpacity>
           {/* Auto-play TTS toggle — ativa reprodução automática das respostas */}
           <TouchableOpacity
             onPress={() => {
@@ -876,12 +932,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             <Icon
               name={ttsAuto ? 'record-voice-over' : 'voice-over-off'}
               size={24}
-              color={ttsAuto ? '#2dd4bf' : '#8b949e'}
+              color={ttsAuto ? '#2dd4bf' : theme.textSecondary}
             />
           </TouchableOpacity>
           {/* Configurações */}
           <TouchableOpacity onPress={onOpenSettings} style={s.iconBtn}>
-            <Icon name="settings" size={24} color="#8b949e" />
+            <Icon name="settings" size={24} color={theme.textSecondary} />
           </TouchableOpacity>
         </View>
       </View>
@@ -897,14 +953,57 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           renderItem={renderMessage}
           keyExtractor={item => item.id ?? `idx-${getTextContent(item).slice(0, 20)}`}
           contentContainerStyle={s.list}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({animated: true})}
-          onLayout={() => listRef.current?.scrollToEnd({animated: false})}
+          // Auto-scroll SÓ quando o usuário está no bottom (não interrompe
+          // a leitura de mensagens antigas). Remove o comportamento de
+          // scroll automático ao focar no input ou expandir thinking.
+          onContentSizeChange={() => {
+            if (isAtBottom) {
+              listRef.current?.scrollToEnd({animated: true});
+            }
+          }}
+          onLayout={(e) => {
+            // Detecta se há conteúdo scrollável (conteúdo > viewport).
+            const layoutHeight = e.nativeEvent.layout.height;
+            // Precisamos do contentHeight — medido no onContentSizeChange.
+            // Aqui só registramos a altura da viewport para comparação.
+            // O hasScrollableContent é atualizado no onScroll.
+          }}
+          onScroll={(e) => {
+            const {layoutMeasurement, contentOffset, contentSize} = e.nativeEvent;
+            // Considera "no bottom" se está a menos de 60px do final.
+            const distanceFromBottom =
+              contentSize.height - layoutMeasurement.height - contentOffset.y;
+            const atBottom = distanceFromBottom < 60;
+            setIsAtBottom(atBottom);
+            // Há conteúdo scrollável se o conteúdo é maior que a viewport.
+            setHasScrollableContent(contentSize.height > layoutMeasurement.height + 10);
+          }}
+          scrollEventThrottle={16}
+          onScrollToIndexFailed={() => {
+            // Fallback: se scrollToIndex falhar (alturas variáveis),
+            // rola para o final como fallback seguro.
+            listRef.current?.scrollToEnd({animated: true});
+          }}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
           automaticallyAdjustContentInsets={false}
           contentInsetAdjustmentBehavior="never"
         />
       </KeyboardAvoidingView>
+
+      {/* Botão flutuante "Rolar para Baixo" — centralizado na parte inferior.
+          Aparece apenas quando há conteúdo para rolar e o usuário não está
+          no final da lista. */}
+      {hasScrollableContent && !isAtBottom && (
+        <TouchableOpacity
+          style={s.scrollDownBtn}
+          onPress={() => {
+            listRef.current?.scrollToEnd({animated: true});
+            setIsAtBottom(true);
+          }}>
+          <Icon name="arrow-downward" size={22} color={theme.textSecondary} />
+        </TouchableOpacity>
+      )}
 
       {/* Status do gravador / transcrição */}
       {(recorder.status === 'processing' ||
@@ -914,7 +1013,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           {recorder.status === 'recording' ? (
             <WaveformAnimation />
           ) : (
-            <ActivityIndicator size="small" color="#58a6ff" />
+            <ActivityIndicator size="small" color={theme.accent} />
           )}
           <Text style={s.statusText}>
             {whisper.status === 'transcribing'
@@ -956,7 +1055,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             style={s.attachBtn}
             onPress={showImagePicker}
             hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-            <Icon name="attach-file" size={22} color="#8b949e" />
+            <Icon name="attach-file" size={22} color={theme.textSecondary} />
           </TouchableOpacity>
 
           {/* Toggle thinking — só visível no modo local (provider === 'local').
@@ -969,7 +1068,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
               <Icon
                 name={thinkingIconName()}
                 size={22}
-                color={thinkingMode ? '#58a6ff' : '#8b949e'}
+                color={thinkingMode ? theme.accent : theme.textSecondary}
               />
             </TouchableOpacity>
           )}
@@ -979,7 +1078,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             value={input}
             onChangeText={setInput}
             placeholder="Mensagem..."
-            placeholderTextColor="#aab2bc"
+            placeholderTextColor={theme.textMuted}
             multiline
             // minHeight/maxHeight via style (nao como props diretas —
             // TextInputProps nao aceita). 1 linha (44px) ate 5 (124px);
@@ -1070,426 +1169,456 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   );
 }
 
-// Estilos para o renderizador de Markdown (dark theme).
-// Sobrescreve apenas as cores — tipografia herda do tema da bubble.
-const mdStyle = StyleSheet.create({
-  body: {color: '#e6edf3', fontSize: 15, lineHeight: 21},
-  heading1: {color: '#e6edf3', fontSize: 22, fontWeight: '700', marginTop: 8, marginBottom: 6},
-  heading2: {color: '#e6edf3', fontSize: 19, fontWeight: '700', marginTop: 6, marginBottom: 4},
-  heading3: {color: '#e6edf3', fontSize: 17, fontWeight: '600', marginTop: 4, marginBottom: 3},
-  heading4: {color: '#e6edf3', fontSize: 16, fontWeight: '600'},
-  heading5: {color: '#e6edf3', fontSize: 15, fontWeight: '600'},
-  heading6: {color: '#8b949e', fontSize: 14, fontWeight: '600'},
-  code_inline: {
-    color: '#f0883e',
-    backgroundColor: '#0d1117',
-    paddingHorizontal: 4,
-    borderRadius: 3,
-    fontFamily: 'monospace',
-  },
-  code_block: {
-    color: '#e6edf3',
-    backgroundColor: '#0d1117',
-    padding: 10,
-    borderRadius: 6,
-    fontFamily: 'monospace',
-    fontSize: 13,
-  },
-  fence: {
-    color: '#e6edf3',
-    backgroundColor: '#0d1117',
-    padding: 10,
-    borderRadius: 6,
-    fontFamily: 'monospace',
-    fontSize: 13,
-  },
-  blockquote: {
-    backgroundColor: '#0d1117',
-    borderLeftWidth: 3,
-    borderLeftColor: '#58a6ff',
-    paddingLeft: 10,
-    paddingVertical: 4,
-    marginVertical: 4,
-  },
-  link: {color: '#58a6ff', textDecorationLine: 'underline'},
-  list_item: {color: '#e6edf3', marginVertical: 2},
-  bullet_list: {color: '#e6edf3'},
-  ordered_list: {color: '#e6edf3'},
-  em: {color: '#e6edf3', fontStyle: 'italic'},
-  strong: {color: '#fff', fontWeight: '700'},
-  text: {color: '#e6edf3'},
-});
+// Estilos para o renderizador de Markdown.
+// Gerados dinamicamente a partir do tema ativo — cores mudam entre dark/light.
+function getMdStyle(t: ThemeColors) {
+  return StyleSheet.create({
+    body: {color: t.text, fontSize: 15, lineHeight: 21},
+    heading1: {color: t.text, fontSize: 22, fontWeight: '700', marginTop: 8, marginBottom: 6},
+    heading2: {color: t.text, fontSize: 19, fontWeight: '700', marginTop: 6, marginBottom: 4},
+    heading3: {color: t.text, fontSize: 17, fontWeight: '600', marginTop: 4, marginBottom: 3},
+    heading4: {color: t.text, fontSize: 16, fontWeight: '600'},
+    heading5: {color: t.text, fontSize: 15, fontWeight: '600'},
+    heading6: {color: t.textSecondary, fontSize: 14, fontWeight: '600'},
+    code_inline: {
+      color: t.codeInline,
+      backgroundColor: t.codeInlineBg,
+      paddingHorizontal: 4,
+      borderRadius: 3,
+      fontFamily: 'monospace',
+    },
+    code_block: {
+      color: t.codeText,
+      backgroundColor: t.codeBg,
+      padding: 10,
+      borderRadius: 6,
+      fontFamily: 'monospace',
+      fontSize: 13,
+    },
+    fence: {
+      color: t.codeText,
+      backgroundColor: t.codeBg,
+      padding: 10,
+      borderRadius: 6,
+      fontFamily: 'monospace',
+      fontSize: 13,
+    },
+    blockquote: {
+      backgroundColor: t.thinkingBg,
+      borderLeftWidth: 3,
+      borderLeftColor: t.accent,
+      paddingLeft: 10,
+      paddingVertical: 4,
+      marginVertical: 4,
+    },
+    link: {color: t.accent, textDecorationLine: 'underline'},
+    list_item: {color: t.text, marginVertical: 2},
+    bullet_list: {color: t.text},
+    ordered_list: {color: t.text},
+    em: {color: t.text, fontStyle: 'italic'},
+    strong: {color: t.text, fontWeight: '700'},
+    text: {color: t.text},
+    // Tabela — bordas visíveis em ambos os temas
+    tr: {borderBottomWidth: 1, borderBottomColor: t.tableBorder},
+    th: {color: t.text, fontWeight: '700', padding: 6, borderRightWidth: 1, borderRightColor: t.tableBorder},
+    td: {color: t.text, padding: 6, borderRightWidth: 1, borderRightColor: t.tableBorder},
+  });
+}
 
 // Regras customizadas de renderização do Markdown.
 // Substitui o renderizador padrão de `fence` (code blocks com fences ```),
 // que depende do prism-react-renderer + MaterialDesignIcons — pesado e
 // suscetível a falhas de layout (a View pai perde overflow/estilos quando
 // o user style sobrescreve fence). Aqui usamos um ScrollView horizontal
-// simples com Text monoespaçado — robusto e consistente com o dark theme.
+// simples com Text monoespaçado — robusto e consistente com o tema.
+//
+// Inclui botão "Copiar" no canto superior direito de cada code block.
+// Em landscape, o ScrollView horizontal expande para o conteúdo (overflow-x
+// auto) em vez de quebrar linhas, igual ao comportamento portrait.
 //
 // Assinatura do RenderRule (v9): (node, children, parentNodes, styles, ...extra) => ReactNode
 //   node.content traz o código bruto da fence.
 //   node.key é obrigatório como key do elemento raiz (animações/reconciliação).
-const markdownRules = {
-  fence: (node: any, _children: any, _parentNodes: any, _styles: any) => (
-    <ScrollView
-      key={node.key}
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      style={{marginVertical: 8}}>
-      <Text style={mdStyle.fence}>{node.content}</Text>
-    </ScrollView>
-  ),
-};
+function createMarkdownRules(t: ThemeColors) {
+  return {
+    fence: (node: any, _children: any, _parentNodes: any, _styles: any) => (
+      <View key={node.key} style={{marginVertical: 8, borderRadius: 6, backgroundColor: t.codeBg, overflow: 'hidden'}}>
+        {/* Botão Copiar no canto superior direito */}
+        <TouchableOpacity
+          style={{
+            position: 'absolute',
+            top: 6,
+            right: 6,
+            zIndex: 10,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 3,
+            paddingHorizontal: 8,
+            paddingVertical: 4,
+            borderRadius: 4,
+            backgroundColor: 'rgba(255,255,255,0.08)',
+          }}
+          onPress={() => {
+            Clipboard.setString(node.content ?? '');
+          }}>
+          <Icon name="content-copy" size={13} color={t.textSecondary} />
+          <Text style={{color: t.textSecondary, fontSize: 11}}>Copiar</Text>
+        </TouchableOpacity>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={{}}
+          contentContainerStyle={{padding: 10}}>
+          <Text style={{color: t.codeText, fontFamily: 'monospace', fontSize: 13}}>
+            {node.content}
+          </Text>
+        </ScrollView>
+      </View>
+    ),
+  };
+}
 
-const s = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: '#0d1117',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#21262d',
-    backgroundColor: '#0d1117',
-  },
-  headerTitle: {
-    color: '#8b949e',
-    fontSize: 14,
-    fontWeight: '600',
-    flex: 1,
-    marginRight: 12,
-  },
-  iconBtn: {
-    padding: 4,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  list: {
-    padding: 16,
-    flexGrow: 1,
-    justifyContent: 'flex-end',
-  },
-  bubble: {
-    maxWidth: '85%',
-    // Largura fixa em ~85% para bubbles consistentes (evita que mensagens
-    // curtas fiquem estreitas demais). Compatibilidade dark/light.
-    width: '85%',
-    padding: 12,
-    // Espaço extra no rodapé para evitar que o conteúdo (Markdown longo)
-    // se sobreponha ao actionBar (copy/regenerate/delete) logo abaixo.
-    paddingBottom: 6,
-    borderRadius: 12,
-    marginBottom: 8,
-  },
-  bubbleUser: {
-    backgroundColor: '#1f6feb',
-    alignSelf: 'flex-end',
-  },
-  bubbleBot: {
-    backgroundColor: '#161b22',
-    alignSelf: 'flex-start',
-  },
-  bubbleError: {
-    backgroundColor: '#3d1f1f',
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: '#6e232e',
-  },
-  bubbleText: {
-    color: '#fff',
-    fontSize: 15,
-  },
-  bubbleTextUser: {
-    color: '#fff',
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 6,
-  },
-  statusText: {
-    color: '#58a6ff',
-    fontSize: 13,
-  },
-  thinkingToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 6,
-    paddingVertical: 2,
-    alignSelf: 'flex-start',
-  },
-  thinkingToggleLabel: {
-    color: '#8b949e',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
-  typingDots: {
-    flexDirection: 'row',
-    gap: 3,
-    marginLeft: 2,
-  },
-  typingDot: {
-    width: 5,
-    height: 5,
-    borderRadius: 3,
-    backgroundColor: '#30363d',
-  },
-  typingDotActive: {
-    backgroundColor: '#58a6ff',
-  },
-  thinkingBox: {
-    backgroundColor: '#0d1117',
-    borderRadius: 8,
-    padding: 8,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#21262d',
-  },
-  actionBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    marginTop: 6,
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: '#21262d',
-    opacity: 0.7,
-  },
-  actionBarItem: {
-    padding: 4,
-  },
-  thinkingText: {
-    color: '#8b949e',
-    fontSize: 12,
-    lineHeight: 16,
-  },
-  waveformContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 3,
-    height: 30,
-  },
-  waveformBar: {
-    width: 4,
-    borderRadius: 2,
-    backgroundColor: '#f0883e',
-  },
-  statusBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    backgroundColor: '#161b22',
-    gap: 8,
-  },
-  inputBar: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#21262d',
-    backgroundColor: '#0d1117',
-    gap: 8,
-  },
-  inputWrap: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    borderRadius: 22,
-    backgroundColor: '#161b22',
-  },
-  thinkingBtn: {
-    // Dentro do input — sem contorno, so o icone. Posicionado a esquerda.
-    width: 40,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingLeft: 4,
-  },
-  attachBtn: {
-    // Botão de anexar imagem (clip) — mesma estrutura do thinkingBtn.
-    width: 40,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingLeft: 4,
-  },
-  input: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 124, // ~5 linhas; acima disso scroll interno (item 5)
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    color: '#e6edf3',
-    fontSize: 15,
-    textAlignVertical: 'center',
-  },
-  actionBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#1f6feb',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  actionBtnStop: {
-    backgroundColor: '#da3633',
-  },
-  actionBtnMic: {
-    backgroundColor: '#21262d',
-  },
-  actionBtnMicActive: {
-    backgroundColor: '#da3633',
-  },
-  actionBtnMicError: {
-    backgroundColor: '#3d1f1f',
-    borderWidth: 1,
-    borderColor: '#f85149',
-  },
-  // --- Imagens no chat (multimodal) ---
-  imageRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 4,
-    marginBottom: 8,
-  },
-  chatImage: {
-    width: 200,
-    height: 200,
-    borderRadius: 8,
-  },
-  // --- Preview de imagens pendentes (acima da input bar) ---
-  pendingImagesRow: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    backgroundColor: '#0d1117',
-    borderTopWidth: 1,
-    borderTopColor: '#21262d',
-  },
-  pendingImageWrap: {
-    position: 'relative',
-    marginRight: 8,
-  },
-  pendingImage: {
-    width: 72,
-    height: 72,
-    borderRadius: 8,
-  },
-  pendingImageRemove: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#da3633',
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#0d1117',
-  },
-  // --- Modal de expansão de imagem (full-screen) ---
-  imageModalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.92)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  imageModalCloseBtn: {
-    position: 'absolute',
-    top: 40,
-    right: 20,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(30,30,30,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
-  },
-  imageModalImage: {
-    width: Dimensions.get('window').width,
-    height: Dimensions.get('window').height * 0.75,
-  },
-  // --- Bottom sheet de seleção de origem (Android) ---
-  pickerSheetOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  pickerSheetCard: {
-    backgroundColor: '#161b22',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingBottom: 24,
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    borderWidth: 1,
-    borderTopColor: '#30363d',
-  },
-  pickerSheetHandle: {
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: '#30363d',
-    alignSelf: 'center',
-    marginBottom: 12,
-  },
-  pickerSheetTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#e6edf3',
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  pickerSheetOptions: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 24,
-    marginBottom: 20,
-  },
-  pickerSheetOption: {
-    alignItems: 'center',
-    width: 100,
-  },
-  pickerSheetIconWrap: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#21262d',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: '#30363d',
-  },
-  pickerSheetOptionLabel: {
-    fontSize: 13,
-    color: '#8b949e',
-    textAlign: 'center',
-  },
-  pickerSheetCancelBtn: {
-    paddingVertical: 14,
-    borderRadius: 10,
-    backgroundColor: '#21262d',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#30363d',
-  },
-  pickerSheetCancelText: {
-    fontSize: 15,
-    color: '#c9d1d9',
-  },
-});
+// Stylesheet dinâmico — cores dependem do tema ativo.
+// Estrutura estrutural (flex, padding, radius) é igual em ambos os temas;
+// só as cores mudam. Isto evita duplicar 300 linhas de StyleSheet.
+function getStyles(t: ThemeColors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: t.bg,
+    },
+    header: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: t.border,
+      backgroundColor: t.bg,
+    },
+    headerTitle: {
+      color: t.textSecondary,
+      fontSize: 14,
+      fontWeight: '600',
+      flex: 1,
+      marginRight: 12,
+    },
+    iconBtn: {
+      padding: 4,
+    },
+    headerActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    list: {
+      padding: 16,
+      flexGrow: 1,
+      justifyContent: 'flex-end',
+    },
+    // Largura 90% conforme solicitado (era 85%)
+    bubble: {
+      maxWidth: '90%',
+      width: '90%',
+      padding: 12,
+      paddingBottom: 6,
+      borderRadius: 12,
+      marginBottom: 8,
+    },
+    bubbleUser: {
+      backgroundColor: t.userBubble,
+      alignSelf: 'flex-end',
+    },
+    bubbleBot: {
+      backgroundColor: t.botBubble,
+      alignSelf: 'flex-start',
+    },
+    bubbleError: {
+      backgroundColor: t.errorBg,
+      alignSelf: 'flex-start',
+      borderWidth: 1,
+      borderColor: t.errorBorder,
+    },
+    bubbleText: {
+      color: t.text,
+      fontSize: 15,
+    },
+    bubbleTextUser: {
+      color: t.userBubbleText,
+    },
+    statusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 6,
+    },
+    statusText: {
+      color: t.accent,
+      fontSize: 13,
+    },
+    thinkingToggle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      marginBottom: 6,
+      paddingVertical: 2,
+      alignSelf: 'flex-start',
+    },
+    thinkingToggleLabel: {
+      color: t.textSecondary,
+      fontSize: 12,
+      fontStyle: 'italic',
+    },
+    thinkingBox: {
+      backgroundColor: t.thinkingBg,
+      borderRadius: 8,
+      padding: 8,
+      marginBottom: 8,
+      borderWidth: 1,
+      borderColor: t.thinkingBorder,
+    },
+    actionBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 2,
+      marginTop: 6,
+      paddingTop: 4,
+      borderTopWidth: 1,
+      borderTopColor: t.border,
+      opacity: 0.7,
+    },
+    actionBarItem: {
+      padding: 4,
+    },
+    thinkingText: {
+      color: t.thinkingText,
+      fontSize: 12,
+      lineHeight: 16,
+    },
+    statusBar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 16,
+      paddingVertical: 6,
+      backgroundColor: t.bgSurface,
+      gap: 8,
+    },
+    inputBar: {
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderTopWidth: 1,
+      borderTopColor: t.border,
+      backgroundColor: t.bg,
+      gap: 8,
+    },
+    inputWrap: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'flex-end',
+      borderRadius: 22,
+      backgroundColor: t.bgSurface,
+    },
+    thinkingBtn: {
+      width: 40,
+      height: 44,
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingLeft: 4,
+    },
+    attachBtn: {
+      width: 40,
+      height: 44,
+      justifyContent: 'center',
+      alignItems: 'center',
+      paddingLeft: 4,
+    },
+    input: {
+      flex: 1,
+      minHeight: 44,
+      maxHeight: 124,
+      paddingHorizontal: 8,
+      paddingVertical: 10,
+      color: t.text,
+      fontSize: 15,
+      textAlignVertical: 'center',
+    },
+    actionBtn: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: t.accent,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    actionBtnStop: {
+      backgroundColor: '#da3633',
+    },
+    actionBtnMic: {
+      backgroundColor: t.bgElevated,
+    },
+    actionBtnMicActive: {
+      backgroundColor: '#da3633',
+    },
+    actionBtnMicError: {
+      backgroundColor: t.errorBg,
+      borderWidth: 1,
+      borderColor: t.errorText,
+    },
+    // --- Imagens no chat (multimodal) ---
+    imageRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 4,
+      marginBottom: 8,
+    },
+    chatImage: {
+      width: 200,
+      height: 200,
+      borderRadius: 8,
+    },
+    // --- Preview de imagens pendentes (acima da input bar) ---
+    pendingImagesRow: {
+      paddingVertical: 6,
+      paddingHorizontal: 12,
+      backgroundColor: t.bg,
+      borderTopWidth: 1,
+      borderTopColor: t.border,
+    },
+    pendingImageWrap: {
+      position: 'relative',
+      marginRight: 8,
+    },
+    pendingImage: {
+      width: 72,
+      height: 72,
+      borderRadius: 8,
+    },
+    pendingImageRemove: {
+      position: 'absolute',
+      top: -4,
+      right: -4,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: '#da3633',
+      justifyContent: 'center',
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: t.bg,
+    },
+    // --- Modal de expansão de imagem (full-screen) ---
+    imageModalOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.92)',
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
+    imageModalCloseBtn: {
+      position: 'absolute',
+      top: 40,
+      right: 20,
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: 'rgba(30,30,30,0.85)',
+      justifyContent: 'center',
+      alignItems: 'center',
+      zIndex: 10,
+    },
+    imageModalImage: {
+      width: Dimensions.get('window').width,
+      height: Dimensions.get('window').height * 0.75,
+    },
+    // --- Bottom sheet de seleção de origem (Android) ---
+    pickerSheetOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.5)',
+      justifyContent: 'flex-end',
+    },
+    pickerSheetCard: {
+      backgroundColor: t.bgSurface,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      paddingBottom: 24,
+      paddingHorizontal: 20,
+      paddingTop: 12,
+      borderWidth: 1,
+      borderTopColor: t.border,
+    },
+    pickerSheetHandle: {
+      width: 40,
+      height: 4,
+      borderRadius: 2,
+      backgroundColor: t.border,
+      alignSelf: 'center',
+      marginBottom: 12,
+    },
+    pickerSheetTitle: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: t.text,
+      textAlign: 'center',
+      marginBottom: 16,
+    },
+    pickerSheetOptions: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      gap: 24,
+      marginBottom: 20,
+    },
+    pickerSheetOption: {
+      alignItems: 'center',
+      width: 100,
+    },
+    pickerSheetIconWrap: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      backgroundColor: t.bgElevated,
+      justifyContent: 'center',
+      alignItems: 'center',
+      marginBottom: 8,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    pickerSheetOptionLabel: {
+      fontSize: 13,
+      color: t.textSecondary,
+      textAlign: 'center',
+    },
+    pickerSheetCancelBtn: {
+      paddingVertical: 14,
+      borderRadius: 10,
+      backgroundColor: t.bgElevated,
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    pickerSheetCancelText: {
+      fontSize: 15,
+      color: t.text,
+    },
+    // --- Botão flutuante "Rolar para Baixo" ---
+    scrollDownBtn: {
+      position: 'absolute',
+      bottom: 80,
+      alignSelf: 'center',
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: t.bgElevated,
+      justifyContent: 'center',
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: t.border,
+      shadowColor: '#000',
+      shadowOffset: {width: 0, height: 2},
+      shadowOpacity: 0.3,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+  });
+}

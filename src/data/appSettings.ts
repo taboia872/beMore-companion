@@ -44,6 +44,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     apiKey: '',
     model: 'llama3',
   },
+  theme: 'dark',
   sttMode: 'on-device',
   sttModelPath: '',
   sttOnlineModel: '',
