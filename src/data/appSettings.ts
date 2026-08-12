@@ -20,7 +20,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {createMMKV} from 'react-native-mmkv';
+import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {AppSettings, AppSettingsV2, ServerEntry, ServerFormat} from '../types';
 import {getServer, saveServer, createServer} from './serverDb';
@@ -32,8 +32,8 @@ import {
 } from './keychainDb';
 import {SERVER_PRESETS} from '../services/ServerService';
 
-// MMKV storage instance (compartilhado com serverDb/modelDb pelo mesmo ID)
-const storage = createMMKV({id: 'bemore-storage'});
+// MMKV storage instance (compartilhado com serverDb/modelDb)
+const storage = new MMKV();
 
 // Chaves de storage
 const SETTINGS_V2_KEY = '@bemore_settings_v2';

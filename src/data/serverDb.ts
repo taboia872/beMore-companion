@@ -7,12 +7,11 @@
  * API keys NÃO são armazenadas aqui — ficam no Keychain (ver keychainDb.ts).
  */
 
-import {createMMKV} from 'react-native-mmkv';
+import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {ServerEntry} from '../types';
 
-// react-native-mmkv v4: MMKV é type-only, createMMKV é a factory.
-const storage = createMMKV({id: 'bemore-storage'});
+const storage = new MMKV();
 const SERVERS_KEY = '@bemore_servers';
 
 /**

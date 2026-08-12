@@ -5,7 +5,7 @@
  * Cada modelo tem FK serverId → ServerEntry.id.
  */
 
-import {createMMKV} from 'react-native-mmkv';
+import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {ModelEntry} from '../types';
 import {
@@ -15,7 +15,7 @@ import {
   isAnyToAnyModel,
 } from '../utils/modelCapabilities';
 
-const storage = createMMKV({id: 'bemore-storage'});
+const storage = new MMKV();
 const MODELS_KEY = '@bemore_models';
 
 /**
