@@ -218,6 +218,11 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   const [isAtBottom, setIsAtBottom] = useState(true);
   // Se o conteúdo da lista é maior que o viewport (há o que rolar).
   const [hasScrollableContent, setHasScrollableContent] = useState(false);
+  // Timestamp do último clique no botão "rolar para baixo". Ignora
+  // eventos onScroll temporariamente após clicar para evitar que o
+  // botão pisque (race condition: scroll animado ainda rolando enquanto
+  // isAtBottom já foi setado para true).
+  const scrollDownClickRef = useRef(0);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -1017,6 +1022,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             // O hasScrollableContent é atualizado no onScroll.
           }}
           onScroll={(e) => {
+            // Ignora onScroll por 400ms após clicar no botão rolar para
+            // baixo — evita que o botão pisque durante a animação.
+            if (Date.now() - scrollDownClickRef.current < 400) return;
             const {layoutMeasurement, contentOffset, contentSize} = e.nativeEvent;
             // Considera "no bottom" se está a menos de 60px do final.
             const distanceFromBottom =
@@ -1046,6 +1054,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         <TouchableOpacity
           style={s.scrollDownBtn}
           onPress={() => {
+            scrollDownClickRef.current = Date.now();
             listRef.current?.scrollToEnd({animated: true});
             setIsAtBottom(true);
           }}>
@@ -1266,11 +1275,70 @@ function getMdStyle(t: ThemeColors) {
     em: {color: t.text, fontStyle: 'italic'},
     strong: {color: t.text, fontWeight: '700'},
     text: {color: t.text},
-    // Tabela — bordas visíveis em ambos os temas
+    // Tabela — fundo e bordas visíveis em ambos os temas
+    table: {
+      borderWidth: 1,
+      borderColor: t.tableBorder,
+      borderRadius: 4,
+      overflow: 'hidden',
+      marginVertical: 8,
+    },
     tr: {borderBottomWidth: 1, borderBottomColor: t.tableBorder},
-    th: {color: t.text, fontWeight: '700', padding: 6, borderRightWidth: 1, borderRightColor: t.tableBorder},
-    td: {color: t.text, padding: 6, borderRightWidth: 1, borderRightColor: t.tableBorder},
+    th: {
+      color: t.text,
+      fontWeight: '700',
+      padding: 6,
+      borderRightWidth: 1,
+      borderRightColor: t.tableBorder,
+      backgroundColor: t.tableHeaderBg,
+    },
+    td: {
+      color: t.text,
+      padding: 6,
+      borderRightWidth: 1,
+      borderRightColor: t.tableBorder,
+    },
   });
+}
+
+/**
+ * CopyCodeButton — botão de copiar para code blocks. Ao clicar, copia o
+ * código para o clipboard e troca o ícone de "content-copy" para "check"
+ * por 2 segundos, dando feedback visual sem perder a função de copiar
+ * (cliques subsequentes copiam novamente).
+ */
+function CopyCodeButton({content, color}: {content: string; color: string}) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handlePress = () => {
+    Clipboard.setString(content);
+    setCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => setCopied(false), 2000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return (
+    <TouchableOpacity
+      style={{
+        position: 'absolute',
+        top: 6,
+        right: 6,
+        zIndex: 10,
+        padding: 6,
+        borderRadius: 4,
+        backgroundColor: 'rgba(255,255,255,0.08)',
+      }}
+      onPress={handlePress}>
+      <Icon name={copied ? 'check' : 'content-copy'} size={14} color={copied ? '#3fb950' : color} />
+    </TouchableOpacity>
+  );
 }
 
 // Regras customizadas de renderização do Markdown.
@@ -1291,22 +1359,7 @@ function createMarkdownRules(t: ThemeColors) {
   return {
     fence: (node: any, _children: any, _parentNodes: any, _styles: any) => (
       <View key={node.key} style={{marginVertical: 8, borderRadius: 6, backgroundColor: t.codeBg, overflow: 'hidden'}}>
-        {/* Botão Copiar no canto superior direito — só ícone */}
-        <TouchableOpacity
-          style={{
-            position: 'absolute',
-            top: 6,
-            right: 6,
-            zIndex: 10,
-            padding: 6,
-            borderRadius: 4,
-            backgroundColor: 'rgba(255,255,255,0.08)',
-          }}
-          onPress={() => {
-            Clipboard.setString(node.content ?? '');
-          }}>
-          <Icon name="content-copy" size={14} color={t.textSecondary} />
-        </TouchableOpacity>
+        <CopyCodeButton content={node.content ?? ''} color={t.textSecondary} />
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}

@@ -306,7 +306,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
    * - AIHorde: TODOS os modelos são gratuitos (crowdsourced)
    * - HuggingFace: assume pago (precisa de API key, modelos paid)
    * - NVIDIA: presume free tier (NVIDIA oferece free credits)
-   * - Ollama Cloud: apenas gemma3:1b, gpt-oss:20b, gpt-oss:120b são gratuitos
+   * - Ollama Cloud: modelos free tier incluem gemma3:1b, gemma4:31b,
+   *   gpt-oss:20b, gpt-oss:120b, nemotron-3-super:cloud, qwen3-vl:235b-cloud,
+   *   qwen3-coder:480b-cloud (lista pode expandir — verificar ollama.com/search?c=cloud)
    * - Outros/llama.cpp: assume pago (modelos locais não têm noção de free)
    */
   const isFreeModel = (id: string): boolean => {
@@ -319,9 +321,17 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     const hostname = detectPreset(draft.llm.baseUrl);
     if (hostname === SERVER_PRESETS.find(p => p.name === 'Groq')?.url) return true;
     if (hostname === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
-    // Ollama Cloud: apenas 3 modelos gratuitos
+    // Ollama Cloud: apenas modelos free tier
     if (hostname === SERVER_PRESETS.find(p => p.name === 'Ollama Cloud')?.url) {
-      return ['gemma3:1b', 'gpt-oss:20b', 'gpt-oss:120b'].includes(lower);
+      return [
+        'gemma3:1b',
+        'gemma4:31b',
+        'gpt-oss:20b',
+        'gpt-oss:120b',
+        'nemotron-3-super:cloud',
+        'qwen3-vl:235b-cloud',
+        'qwen3-coder:480b-cloud',
+      ].includes(lower);
     }
     return false;
   };
