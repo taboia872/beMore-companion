@@ -143,6 +143,43 @@ function WaveformAnimation() {
   );
 }
 
+/**
+ * AnimatedBubble — wrapper que aplica fade-in + slide-up suave quando uma
+ * mensagem aparece no chat. Inspirado nas animações do ChatGPT: a mensagem
+ * desliza de baixo para cima com fade-in, suavemente (~300ms).
+ */
+function AnimatedBubble({children, delay = 0}: {children: React.ReactNode; delay?: number}) {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(8)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 280,
+        delay,
+        useNativeDriver: true,
+      }),
+      Animated.timing(translateY, {
+        toValue: 0,
+        duration: 280,
+        delay,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [fadeAnim, translateY, delay]);
+
+  return (
+    <Animated.View
+      style={{
+        opacity: fadeAnim,
+        transform: [{translateY}],
+      }}>
+      {children}
+    </Animated.View>
+  );
+}
+
 interface Props {
   settings: AppSettings;
   messages: Message[];
@@ -769,15 +806,16 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
 
     return (
-      <View
-        style={[
-          s.bubble,
-          isUser
-            ? s.bubbleUser
-            : item.isError
-              ? s.bubbleError
-              : s.bubbleBot,
-        ]}>
+      <AnimatedBubble>
+        <View
+          style={[
+            s.bubble,
+            isUser
+              ? s.bubbleUser
+              : item.isError
+                ? s.bubbleError
+                : s.bubbleBot,
+          ]}>
         {/* status de geração — feedback de "pensando" */}
         {statusLabel && (
           <View style={s.statusRow}>
@@ -847,42 +885,52 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
         {/* Action bar estilo llama-ui: icones apos a mensagem. */}
         {!isStreamingMsg && !item.isError && (
           <View style={s.actionBar}>
-            <TouchableOpacity
-              style={s.actionBarItem}
-              onPress={() => copyMessage(item)}
-              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-              <Icon name="content-copy" size={15} color={theme.textSecondary} />
-            </TouchableOpacity>
-            {/* TTS: botão de alto-falante (só para mensagens do assistant). */}
-            {!isUser && (
-              <TouchableOpacity
-                style={s.actionBarItem}
-                onPress={() => speakMessage(item)}
-                hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-                <Icon
-                  name={speakingId === item.id ? 'stop' : 'volume-up'}
-                  size={15}
-                  color={speakingId === item.id ? '#2dd4bf' : theme.textSecondary}
-                />
-              </TouchableOpacity>
-            )}
-            {!isUser && (
-              <TouchableOpacity
-                style={s.actionBarItem}
-                onPress={() => regenerateMessage(item)}
-                hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-                <Icon name="refresh" size={15} color={theme.textSecondary} />
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity
-              style={s.actionBarItem}
-              onPress={() => deleteMessage(item)}
-              hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
-              <Icon name="delete-outline" size={15} color={theme.textSecondary} />
-            </TouchableOpacity>
+            {/* Cor do ícone: branco semi-transparente na bubble azul do user
+                para contraste; cinza na bubble do bot. */}
+            {(() => {
+              const iconColor = isUser ? 'rgba(255,255,255,0.65)' : theme.textSecondary;
+              return (
+                <>
+                  <TouchableOpacity
+                    style={s.actionBarItem}
+                    onPress={() => copyMessage(item)}
+                    hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                    <Icon name="content-copy" size={15} color={iconColor} />
+                  </TouchableOpacity>
+                  {/* TTS: botão de alto-falante (só para mensagens do assistant). */}
+                  {!isUser && (
+                    <TouchableOpacity
+                      style={s.actionBarItem}
+                      onPress={() => speakMessage(item)}
+                      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                      <Icon
+                        name={speakingId === item.id ? 'stop' : 'volume-up'}
+                        size={15}
+                        color={speakingId === item.id ? '#2dd4bf' : iconColor}
+                      />
+                    </TouchableOpacity>
+                  )}
+                  {!isUser && (
+                    <TouchableOpacity
+                      style={s.actionBarItem}
+                      onPress={() => regenerateMessage(item)}
+                      hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                      <Icon name="refresh" size={15} color={iconColor} />
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    style={s.actionBarItem}
+                    onPress={() => deleteMessage(item)}
+                    hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                    <Icon name="delete-outline" size={15} color={iconColor} />
+                  </TouchableOpacity>
+                </>
+              );
+            })()}
           </View>
         )}
       </View>
+      </AnimatedBubble>
     );
   };
 
@@ -916,7 +964,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
               );
             }}
             style={s.iconBtn}>
-            <Icon name="add-comment" size={24} color={theme.textSecondary} />
+            <Icon name="add-circle-outline" size={24} color={theme.textSecondary} />
           </TouchableOpacity>
           {/* Auto-play TTS toggle — ativa reprodução automática das respostas */}
           <TouchableOpacity
@@ -1001,7 +1049,7 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
             listRef.current?.scrollToEnd({animated: true});
             setIsAtBottom(true);
           }}>
-          <Icon name="arrow-downward" size={22} color={theme.textSecondary} />
+          <Icon name="arrow-downward" size={18} color={theme.textSecondary} />
         </TouchableOpacity>
       )}
 
@@ -1243,26 +1291,21 @@ function createMarkdownRules(t: ThemeColors) {
   return {
     fence: (node: any, _children: any, _parentNodes: any, _styles: any) => (
       <View key={node.key} style={{marginVertical: 8, borderRadius: 6, backgroundColor: t.codeBg, overflow: 'hidden'}}>
-        {/* Botão Copiar no canto superior direito */}
+        {/* Botão Copiar no canto superior direito — só ícone */}
         <TouchableOpacity
           style={{
             position: 'absolute',
             top: 6,
             right: 6,
             zIndex: 10,
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 3,
-            paddingHorizontal: 8,
-            paddingVertical: 4,
+            padding: 6,
             borderRadius: 4,
             backgroundColor: 'rgba(255,255,255,0.08)',
           }}
           onPress={() => {
             Clipboard.setString(node.content ?? '');
           }}>
-          <Icon name="content-copy" size={13} color={t.textSecondary} />
-          <Text style={{color: t.textSecondary, fontSize: 11}}>Copiar</Text>
+          <Icon name="content-copy" size={14} color={t.textSecondary} />
         </TouchableOpacity>
         <ScrollView
           horizontal
@@ -1314,8 +1357,12 @@ function getStyles(t: ThemeColors) {
     },
     list: {
       padding: 16,
+      paddingBottom: 8,
       flexGrow: 1,
-      justifyContent: 'flex-end',
+      // Sem justifyContent: 'flex-end' — o flex-end causava overscroll
+      // (espaço extra além da última mensagem). Sem ele, o conteúdo
+      // naturalmente preenche de cima para baixo, e o scroll para
+      // exatamente no final.
     },
     // Largura 90% conforme solicitado (era 85%)
     bubble: {
@@ -1606,9 +1653,9 @@ function getStyles(t: ThemeColors) {
       position: 'absolute',
       bottom: 80,
       alignSelf: 'center',
-      width: 44,
-      height: 44,
-      borderRadius: 22,
+      width: 36,
+      height: 36,
+      borderRadius: 18,
       backgroundColor: t.bgElevated,
       justifyContent: 'center',
       alignItems: 'center',
@@ -1616,9 +1663,9 @@ function getStyles(t: ThemeColors) {
       borderColor: t.border,
       shadowColor: '#000',
       shadowOffset: {width: 0, height: 2},
-      shadowOpacity: 0.3,
-      shadowRadius: 4,
-      elevation: 5,
+      shadowOpacity: 0.25,
+      shadowRadius: 3,
+      elevation: 4,
     },
   });
 }

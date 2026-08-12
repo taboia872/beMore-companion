@@ -1,4 +1,4 @@
-import React, {useState, useRef, useEffect} from 'react';
+import React, {useState} from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,7 @@ import {AppSettings, LlmProvider} from '../types';
 import {saveSettings, loadApiKeyForServer, saveApiKeyForServer} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
+import {getTheme, ThemeColors} from '../utils/theme';
 
 /**
  * Nome do ícone do checkbox de streaming conforme estado ligado/desligado.
@@ -57,7 +58,7 @@ interface ServerPreset {
 const SERVER_PRESETS: ServerPreset[] = [
   {name: 'Google AI Studio', url: 'https://generativelanguage.googleapis.com/v1beta', icon: 'auto-awesome', hasFreeModels: true},
   {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', icon: 'route', hasFreeModels: true},
-  {name: 'Ollama Cloud', url: 'https://ollama.com/v1', icon: 'cloud-queue'},
+  {name: 'Ollama Cloud', url: 'https://ollama.com/v1', icon: 'cloud-queue', hasFreeModels: true},
   {name: 'Groq', url: 'https://api.groq.com/openai/v1', icon: 'bolt', hasFreeModels: true},
   {name: 'NVIDIA', url: 'https://integrate.api.nvidia.com/v1', icon: 'memory', hasFreeModels: true},
   {name: 'AIHorde', url: 'https://oai.aihorde.net/v1', icon: 'groups', hasFreeModels: true},
@@ -72,36 +73,43 @@ interface CardProps {
   children: React.ReactNode;
   /** Se true, começa expandido (default: false). */
   defaultExpanded?: boolean;
+  /** Tema ativo — indica as cores a usar no card. */
+  theme: ThemeColors;
 }
 
 /**
  * Container visual p/ agrupar uma seção de configurações (item 6).
  * Agora com suporte a accordion: header clicável expande/colapsa o conteúdo.
  */
-function Card({title, icon, children, defaultExpanded = false}: CardProps) {
+function Card({title, icon, children, defaultExpanded = false, theme}: CardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const cardStyles = getStyles(theme);
   return (
-    <View style={s.card}>
+    <View style={cardStyles.card}>
       <TouchableOpacity
-        style={s.cardHeader}
+        style={cardStyles.cardHeader}
         activeOpacity={0.7}
         onPress={() => setExpanded(v => !v)}>
-        <Icon name={icon as any} size={18} color="#58a6ff" />
-        <Text style={s.cardTitle}>{title}</Text>
+        <Icon name={icon as any} size={18} color={theme.accent} />
+        <Text style={cardStyles.cardTitle}>{title}</Text>
         <Icon
           name={expanded ? 'expand-less' : 'expand-more'}
           size={22}
-          color="#8b949e"
-          style={s.cardChevron}
+          color={theme.textSecondary}
+          style={cardStyles.cardChevron}
         />
       </TouchableOpacity>
-      {expanded && <View style={s.cardBody}>{children}</View>}
+      {expanded && <View style={cardStyles.cardBody}>{children}</View>}
     </View>
   );
 }
 
 export function SettingsScreen({settings, onChange, onClose}: Props) {
   const [draft, setDraft] = useState<AppSettings>(settings);
+
+  // Tema dinâmico (claro/escuro) — aplica a todas as cores desta tela.
+  const theme = getTheme(settings.theme);
+  const s = getStyles(theme);
 
   const [fetchingModels, setFetchingModels] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -178,36 +186,36 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     return preset?.icon ?? 'dns';
   };
 
-
-  // Toast — balão temporizado que aparece no topo e some sozinho.
-  // Substitui o Alert.alert('Salvo', ...) por algo menos intrusivo.
-  const [toast, setToast] = useState<string | null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const showToast = (msg: string) => {
-    setToast(msg);
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 2500);
+  /**
+   * Helper central p/ aplicar mudanças imediatamente. Atualiza o draft
+   * local, propaga onChange (síncrono) e persiste em background via
+   * saveSettings (sem await — não bloqueia a UI). Substitui o antigo
+   * fluxo draft → save() com botão Salvar.
+   */
+  const update = (patch: Partial<AppSettings>) => {
+    setDraft(prev => {
+      const next: AppSettings = {
+        ...prev,
+        ...patch,
+        llm: patch.llm ? {...prev.llm, ...patch.llm} : prev.llm,
+      };
+      onChange(next);
+      saveSettings(next); // persistência em background (não precisa await)
+      return next;
+    });
   };
 
-  useEffect(() => {
-    return () => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-    };
-  }, []);
-
+  /** Atalho p/ atualizar apenas campos de llm — mantém ergonomia do `updateLlm`. */
   const updateLlm = (patch: Partial<AppSettings['llm']>) =>
-    setDraft(d => ({...d, llm: {...d.llm, ...patch}}));
-
-  const save = async () => {
-    try {
-      await saveSettings(draft);
-      onChange(draft);
-      showToast('Configurações salvas');
-    } catch (e) {
-      Alert.alert('Erro ao salvar', (e as Error).message ?? String(e));
-    }
-  };
+    setDraft(prev => {
+      const next: AppSettings = {
+        ...prev,
+        llm: {...prev.llm, ...patch},
+      };
+      onChange(next);
+      saveSettings(next);
+      return next;
+    });
 
   const fetchModels = async () => {
     if (!draft.llm.baseUrl?.trim()) {
@@ -279,9 +287,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
 
   const pickModel = (id: string) => {
     if (ttsPickerMode) {
-      setDraft({...draft, ttsOnlineModel: id});
+      update({ttsOnlineModel: id});
     } else if (sttPickerMode) {
-      setDraft({...draft, sttOnlineModel: id});
+      update({sttOnlineModel: id});
     } else {
       updateLlm({model: id});
     }
@@ -298,7 +306,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
    * - AIHorde: TODOS os modelos são gratuitos (crowdsourced)
    * - HuggingFace: assume pago (precisa de API key, modelos paid)
    * - NVIDIA: presume free tier (NVIDIA oferece free credits)
-   * - Outros/Ollama/llama.cpp: assume pago (modelos locais não têm noção de free)
+   * - Ollama Cloud: apenas gemma3:1b, gpt-oss:20b, gpt-oss:120b são gratuitos
+   * - Outros/llama.cpp: assume pago (modelos locais não têm noção de free)
    */
   const isFreeModel = (id: string): boolean => {
     const lower = id.toLowerCase();
@@ -310,6 +319,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
     const hostname = detectPreset(draft.llm.baseUrl);
     if (hostname === SERVER_PRESETS.find(p => p.name === 'Groq')?.url) return true;
     if (hostname === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
+    // Ollama Cloud: apenas 3 modelos gratuitos
+    if (hostname === SERVER_PRESETS.find(p => p.name === 'Ollama Cloud')?.url) {
+      return ['gemma3:1b', 'gpt-oss:20b', 'gpt-oss:120b'].includes(lower);
+    }
     return false;
   };
 
@@ -340,32 +353,22 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   return (
     <View style={s.overlay}>
       <StatusBar
-        backgroundColor="#0d1117"
-        barStyle="light-content"
+        backgroundColor={theme.bg}
+        barStyle={theme.statusBar}
         translucent={false}
       />
       <SafeAreaView style={s.safe}>
 
       <View style={s.header}>
         <TouchableOpacity onPress={onClose} style={s.backBtn}>
-          <Icon name="arrow-back" size={24} color="#e6edf3" />
+          <Icon name="arrow-back" size={24} color={theme.text} />
         </TouchableOpacity>
         <Text style={s.headerTitle}>Configurações</Text>
       </View>
 
-      {/* Toast — balão temporizado que aparece no topo e some em 2.5s */}
-      {toast && (
-        <View style={s.toastWrap} pointerEvents="none">
-          <View style={s.toast}>
-            <Icon name="check-circle" size={18} color="#3fb950" />
-            <Text style={s.toastText}>{toast}</Text>
-          </View>
-        </View>
-      )}
-
       <ScrollView contentContainerStyle={s.container}>
         {/* Card: Provedor + dados conforme tipo (item 6 — agrupado) */}
-        <Card title="Modelo de Linguagem" icon="memory" defaultExpanded={true}>
+        <Card title="Modelo de Linguagem" icon="memory" defaultExpanded={true} theme={theme}>
           {/* Tabs Online / Local — texto encurtado (item 6) */}
           <View style={s.row}>
             <TouchableOpacity
@@ -374,7 +377,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               <Icon
                 name="cloud-queue"
                 size={18}
-                color={draft.llm.provider === 'localhost' ? '#fff' : '#8b949e'}
+                color={draft.llm.provider === 'localhost' ? theme.accentText : theme.textSecondary}
               />
               <Text
                 style={[
@@ -390,7 +393,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               <Icon
                 name="smartphone"
                 size={18}
-                color={draft.llm.provider === 'local' ? '#fff' : '#8b949e'}
+                color={draft.llm.provider === 'local' ? theme.accentText : theme.textSecondary}
               />
               <Text
                 style={[
@@ -412,7 +415,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 <Icon
                   name={selectedServerIcon() as any}
                   size={20}
-                  color="#58a6ff"
+                  color={theme.accent}
                 />
                 <Text style={s.dropdownBtnText} numberOfLines={1}>
                   {selectedServerName()}
@@ -420,7 +423,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 <Icon
                   name={serverDropdownOpen ? 'expand-less' : 'expand-more'}
                   size={22}
-                  color="#8b949e"
+                  color={theme.textSecondary}
                 />
               </TouchableOpacity>
 
@@ -438,7 +441,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                       <Icon
                         name={preset.icon as any}
                         size={18}
-                        color={selectedPreset === preset.url ? '#58a6ff' : '#8b949e'}
+                        color={selectedPreset === preset.url ? theme.accent : theme.textSecondary}
                       />
                       <Text
                         style={[
@@ -468,7 +471,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     <Icon
                       name="edit"
                       size={18}
-                      color={selectedPreset === CUSTOM_SERVER ? '#58a6ff' : '#8b949e'}
+                      color={selectedPreset === CUSTOM_SERVER ? theme.accent : theme.textSecondary}
                     />
                     <Text
                       style={[
@@ -493,7 +496,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     style={s.input}
                     value={draft.llm.baseUrl}
                     placeholder="http://192.168.0.10:11434/v1"
-                    placeholderTextColor="#aab2bc"
+                    placeholderTextColor={theme.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
                     onChangeText={v => updateLlm({baseUrl: v})}
@@ -513,7 +516,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 style={s.input}
                 value={draft.llm.apiKey}
                 placeholder="Bearer token"
-                placeholderTextColor="#aab2bc"
+                placeholderTextColor={theme.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
                 secureTextEntry
@@ -526,7 +529,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   style={[s.input, s.modelInput]}
                   value={draft.llm.model}
                   placeholder="llama3, qwen2.5, etc"
-                  placeholderTextColor="#aab2bc"
+                  placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                   autoCorrect={false}
                   onChangeText={v => updateLlm({model: v})}
@@ -536,9 +539,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   onPress={fetchModels}
                   disabled={fetchingModels}>
                   {fetchingModels ? (
-                    <ActivityIndicator size="small" color="#fff" />
+                    <ActivityIndicator size="small" color={theme.accentText} />
                   ) : (
-                    <Icon name="search" size={20} color="#fff" />
+                    <Icon name="search" size={20} color={theme.accentText} />
                   )}
                 </TouchableOpacity>
               </View>
@@ -556,7 +559,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 style={s.input}
                 value={draft.llm.localModelPath ?? ''}
                 placeholder="/data/.../models/model.gguf"
-                placeholderTextColor="#aab2bc"
+                placeholderTextColor={theme.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
                 onChangeText={v => updateLlm({localModelPath: v})}
@@ -566,16 +569,16 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         </Card>
 
         {/* Card: Voz (STT) — toggle online/on-device */}
-        <Card title="Voz (STT)" icon="mic">
+        <Card title="Voz (STT)" icon="mic" theme={theme}>
           {/* Toggle: Online ↔ On-device (Online à esquerda, On-device à direita) */}
           <View style={s.row}>
             <TouchableOpacity
               style={[s.tab, draft.sttMode === 'online' && s.tabActive]}
-              onPress={() => setDraft({...draft, sttMode: 'online'})}>
+              onPress={() => update({sttMode: 'online'})}>
               <Icon
                 name="cloud-queue"
                 size={18}
-                color={draft.sttMode === 'online' ? '#fff' : '#8b949e'}
+                color={draft.sttMode === 'online' ? theme.accentText : theme.textSecondary}
               />
               <Text
                 style={[
@@ -587,11 +590,11 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             </TouchableOpacity>
             <TouchableOpacity
               style={[s.tab, (draft.sttMode ?? 'on-device') === 'on-device' && s.tabActive]}
-              onPress={() => setDraft({...draft, sttMode: 'on-device'})}>
+              onPress={() => update({sttMode: 'on-device'})}>
               <Icon
                 name="smartphone"
                 size={18}
-                color={(draft.sttMode ?? 'on-device') === 'on-device' ? '#fff' : '#8b949e'}
+                color={(draft.sttMode ?? 'on-device') === 'on-device' ? theme.accentText : theme.textSecondary}
               />
               <Text
                 style={[
@@ -614,10 +617,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 style={s.input}
                 value={draft.sttModelPath ?? ''}
                 placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
-                placeholderTextColor="#aab2bc"
+                placeholderTextColor={theme.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
-                onChangeText={v => setDraft({...draft, sttModelPath: v})}
+                onChangeText={v => update({sttModelPath: v})}
               />
             </>
           ) : (
@@ -632,10 +635,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   style={[s.input, s.modelInput]}
                   value={draft.sttOnlineModel ?? ''}
                   placeholder="whisper-large-v3, whisper-large-v3-turbo, etc"
-                  placeholderTextColor="#aab2bc"
+                  placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  onChangeText={v => setDraft({...draft, sttOnlineModel: v})}
+                  onChangeText={v => update({sttOnlineModel: v})}
                 />
                 <TouchableOpacity
                   style={s.fetchBtn}
@@ -703,9 +706,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   }}
                   disabled={fetchingModels}>
                   {fetchingModels ? (
-                    <ActivityIndicator size="small" color="#fff" />
+                    <ActivityIndicator size="small" color={theme.accentText} />
                   ) : (
-                    <Icon name="search" size={20} color="#fff" />
+                    <Icon name="search" size={20} color={theme.accentText} />
                   )}
                 </TouchableOpacity>
               </View>
@@ -724,10 +727,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 style={s.input}
                 value={draft.sttServerOverride ?? ''}
                 placeholder="Deixe vazio para usar o mesmo do chat"
-                placeholderTextColor="#aab2bc"
+                placeholderTextColor={theme.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
-                onChangeText={v => setDraft({...draft, sttServerOverride: v})}
+                onChangeText={v => update({sttServerOverride: v})}
               />
               <Text style={s.hint}>
                 Por padrão usa a URL+API Key do servidor de chat. Preencha
@@ -739,7 +742,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         </Card>
 
         {/* Card: Voz (TTS) — síntese de áudio via API online */}
-        <Card title="Voz (TTS)" icon="volume-up">
+        <Card title="Voz (TTS)" icon="volume-up" theme={theme}>
           {(() => {
             const ttsBaseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl || '');
             const isGemini = ttsBaseUrl.includes('generativelanguage.googleapis.com');
@@ -758,10 +761,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     style={[s.input, s.modelInput]}
                     value={draft.ttsOnlineModel ?? ''}
                     placeholder={isGemini ? 'gemini-2.5-flash-preview-tts' : 'tts-1, tts-1-hd, etc'}
-                    placeholderTextColor="#aab2bc"
+                    placeholderTextColor={theme.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
-                    onChangeText={v => setDraft({...draft, ttsOnlineModel: v})}
+                    onChangeText={v => update({ttsOnlineModel: v})}
                   />
                   <TouchableOpacity
                     style={s.fetchBtn}
@@ -824,9 +827,9 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                     }}
                     disabled={fetchingModels}>
                     {fetchingModels ? (
-                      <ActivityIndicator size="small" color="#fff" />
+                      <ActivityIndicator size="small" color={theme.accentText} />
                     ) : (
-                      <Icon name="search" size={20} color="#fff" />
+                      <Icon name="search" size={20} color={theme.accentText} />
                     )}
                   </TouchableOpacity>
                 </View>
@@ -845,10 +848,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   style={s.input}
                   value={draft.ttsVoice ?? ''}
                   placeholder={isGemini ? 'Kore, Charon, Aoede, Fenrir...' : 'alloy, nova, shimmer, echo, fable, onyx'}
-                  placeholderTextColor="#aab2bc"
+                  placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  onChangeText={v => setDraft({...draft, ttsVoice: v})}
+                  onChangeText={v => update({ttsVoice: v})}
                 />
                 <Text style={s.hint}>
                   {isGemini
@@ -862,10 +865,10 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   style={s.input}
                   value={draft.ttsServerOverride ?? ''}
                   placeholder="Deixe vazio para usar o mesmo do chat"
-                  placeholderTextColor="#aab2bc"
+                  placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  onChangeText={v => setDraft({...draft, ttsServerOverride: v})}
+                  onChangeText={v => update({ttsServerOverride: v})}
                 />
                 <Text style={s.hint}>
                   Por padrão usa a URL+API Key do servidor de chat. Preencha
@@ -877,7 +880,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         </Card>
 
         {/* Card: Misc — agrupa Prompt do Sistema + Streaming de Respostas */}
-        <Card title="Misc" icon="settings">
+        <Card title="Misc" icon="settings" theme={theme}>
           {/* Sub-seção: Prompt do Sistema */}
           <Text style={[s.subSectionTitle, {marginTop: 0}]}>Prompt do Sistema</Text>
           <TextInput
@@ -885,7 +888,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             value={draft.systemPrompt}
             multiline
             numberOfLines={4}
-            onChangeText={v => setDraft({...draft, systemPrompt: v})}
+            onChangeText={v => update({systemPrompt: v})}
           />
           <Text style={s.hint}>
             Instruções base que definem o comportamento do assistant. Aplicadas ao
@@ -900,8 +903,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 s.themeOption,
                 (draft.theme ?? 'dark') === 'dark' && s.themeOptionActive,
               ]}
-              onPress={() => setDraft(d => ({...d, theme: 'dark'}))}>
-              <Icon name="dark-mode" size={20} color={(draft.theme ?? 'dark') === 'dark' ? '#58a6ff' : '#8b949e'} />
+              onPress={() => update({theme: 'dark'})}>
+              <Icon name="dark-mode" size={20} color={(draft.theme ?? 'dark') === 'dark' ? theme.accent : theme.textSecondary} />
               <Text style={[
                 s.themeOptionLabel,
                 (draft.theme ?? 'dark') === 'dark' && s.themeOptionLabelActive,
@@ -912,8 +915,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                 s.themeOption,
                 draft.theme === 'light' && s.themeOptionActive,
               ]}
-              onPress={() => setDraft(d => ({...d, theme: 'light'}))}>
-              <Icon name="light-mode" size={20} color={draft.theme === 'light' ? '#58a6ff' : '#8b949e'} />
+              onPress={() => update({theme: 'light'})}>
+              <Icon name="light-mode" size={20} color={draft.theme === 'light' ? theme.accent : theme.textSecondary} />
               <Text style={[
                 s.themeOptionLabel,
                 draft.theme === 'light' && s.themeOptionLabelActive,
@@ -926,7 +929,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
           <TouchableOpacity
             style={s.toggleRow}
             onPress={() =>
-              setDraft(d => ({...d, streamingEnabled: !d.streamingEnabled}))
+              update({streamingEnabled: !draft.streamingEnabled})
             }>
             <Text style={s.toggleLabel}>
               Receber respostas em tempo real
@@ -934,7 +937,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             <Icon
               name={streamingCheckboxIcon(draft.streamingEnabled === true)}
               size={24}
-              color={draft.streamingEnabled === true ? '#3fb950' : '#8b949e'}
+              color={draft.streamingEnabled === true ? '#3fb950' : theme.textSecondary}
             />
           </TouchableOpacity>
           <Text style={s.hint}>
@@ -943,12 +946,6 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
             completa de uma vez.
           </Text>
         </Card>
-
-        {/* Botão salvar */}
-        <TouchableOpacity style={s.saveBtn} onPress={save}>
-          <Icon name="check" size={20} color="#fff" />
-          <Text style={s.saveBtnText}>Salvar</Text>
-        </TouchableOpacity>
       </ScrollView>
 
       {/* Modal de seleção de modelos */}
@@ -964,7 +961,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   : 'Modelos disponíveis'}
               </Text>
               <TouchableOpacity onPress={() => setShowModelsModal(false)} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                <Icon name="close" size={22} color="#8b949e" />
+                <Icon name="close" size={22} color={theme.textSecondary} />
               </TouchableOpacity>
             </View>
 
@@ -980,7 +977,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               <TouchableOpacity
                 style={[s.filterBtn, modelFilter === 'free' && s.filterBtnFreeActive]}
                 onPress={() => setModelFilter('free')}>
-                <Icon name="volunteer-activism" size={14} color={modelFilter === 'free' ? '#fff' : '#3fb950'} />
+                <Icon name="volunteer-activism" size={14} color={modelFilter === 'free' ? theme.accentText : '#3fb950'} />
                 <Text style={[s.filterBtnText, modelFilter === 'free' && s.filterBtnTextActive]}>
                   Grátis ({freeCount})
                 </Text>
@@ -988,7 +985,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               <TouchableOpacity
                 style={[s.filterBtn, modelFilter === 'stt' && s.filterBtnSttActive]}
                 onPress={() => setModelFilter('stt')}>
-                <Icon name="mic" size={14} color={modelFilter === 'stt' ? '#fff' : '#f0883e'} />
+                <Icon name="mic" size={14} color={modelFilter === 'stt' ? theme.accentText : '#f0883e'} />
                 <Text style={[s.filterBtnText, modelFilter === 'stt' && s.filterBtnTextActive]}>
                   STT ({sttCount})
                 </Text>
@@ -996,7 +993,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
               <TouchableOpacity
                 style={[s.filterBtn, modelFilter === 'tts' && s.filterBtnTtsActive]}
                 onPress={() => setModelFilter('tts')}>
-                <Icon name="volume-up" size={14} color={modelFilter === 'tts' ? '#fff' : '#2dd4bf'} />
+                <Icon name="volume-up" size={14} color={modelFilter === 'tts' ? theme.accentText : '#2dd4bf'} />
                 <Text style={[s.filterBtnText, modelFilter === 'tts' && s.filterBtnTextActive]}>
                   TTS ({ttsCount})
                 </Text>
@@ -1012,7 +1009,7 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
                   <TouchableOpacity
                     style={s.modelItem}
                     onPress={() => pickModel(item)}>
-                    <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : '#58a6ff'} />
+                    <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : theme.accent} />
                     <Text style={s.modelItemText} numberOfLines={1}>
                       {shortModelName(item)}
                     </Text>
@@ -1086,19 +1083,20 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   );
 }
 
-const s = StyleSheet.create({
+function getStyles(t: ThemeColors) {
+  return StyleSheet.create({
   // Overlay absolute fullscreen — cobre o ChatScreen por baixo (que continua
   // montado, preservando o estado). Animação de entrada pode ser adicionada
   // depois via Animated.
   overlay: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
     zIndex: 10,
   },
   safe: {
     flex: 1,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
   },
   header: {
     flexDirection: 'row',
@@ -1106,25 +1104,25 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#21262d',
-    backgroundColor: '#0d1117',
+    borderBottomColor: t.border,
+    backgroundColor: t.bg,
   },
   backBtn: {
     padding: 8,
     marginRight: 8,
   },
   headerTitle: {
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 20,
     fontWeight: '700',
   },
   container: {padding: 16, paddingBottom: 60, gap: 14},
   /* Card — container que agrupa uma seção (item 6) */
   card: {
-    backgroundColor: '#161b22',
+    backgroundColor: t.bgSurface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
     padding: 16,
   },
   cardHeader: {
@@ -1140,14 +1138,14 @@ const s = StyleSheet.create({
     marginTop: 12,
   },
   subSectionTitle: {
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 14,
     fontWeight: '700',
     marginTop: 14,
     marginBottom: 6,
   },
   cardTitle: {
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 15,
     fontWeight: '700',
   },
@@ -1160,35 +1158,35 @@ const s = StyleSheet.create({
     gap: 6,
     paddingVertical: 14,
     borderRadius: 10,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
   },
-  tabActive: {backgroundColor: '#1f6feb'},
-  tabText: {color: '#8b949e', fontWeight: '600', fontSize: 14},
-  tabTextActive: {color: '#fff'},
-  label: {fontSize: 13, color: '#8b949e', marginBottom: 6, marginTop: 14},
+  tabActive: {backgroundColor: t.userBubble},
+  tabText: {color: t.textSecondary, fontWeight: '600', fontSize: 14},
+  tabTextActive: {color: t.accentText},
+  label: {fontSize: 13, color: t.textSecondary, marginBottom: 6, marginTop: 14},
   /* Dropdown de servidor */
   dropdownBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
     borderRadius: 10,
     padding: 14,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
   },
   dropdownBtnText: {
     flex: 1,
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 15,
     fontWeight: '600',
   },
   dropdownList: {
     marginTop: 4,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
     overflow: 'hidden',
   },
   dropdownItem: {
@@ -1198,65 +1196,37 @@ const s = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderBottomWidth: 1,
-    borderBottomColor: '#161b22',
+    borderBottomColor: t.bgSurface,
   },
   dropdownItemActive: {
-    backgroundColor: '#161b22',
+    backgroundColor: t.bgSurface,
   },
   dropdownItemText: {
     flex: 1,
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 14,
   },
   dropdownItemTextActive: {
-    color: '#58a6ff',
+    color: t.accent,
     fontWeight: '600',
   },
   urlDisplay: {
     fontSize: 11,
-    color: '#6e7681',
+    color: t.textMuted,
     marginTop: 6,
     fontFamily: 'monospace',
   },
   input: {
-    backgroundColor: '#0d1117',
-    color: '#e6edf3',
+    backgroundColor: t.bg,
+    color: t.text,
     borderRadius: 10,
     padding: 14,
     fontSize: 15,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
   },
   textarea: {minHeight: 96, textAlignVertical: 'top'},
-  hint: {fontSize: 12, color: '#8b949e', marginTop: 6},
-  /* Toast — balão temporizado no topo */
-  toastWrap: {
-    position: 'absolute',
-    top: 60,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 100,
-  },
-  toast: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#238636',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    shadowColor: '#000',
-    shadowOffset: {width: 0, height: 2},
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  toastText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  hint: {fontSize: 12, color: t.textSecondary, marginTop: 6},
   modelRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1277,7 +1247,7 @@ const s = StyleSheet.create({
     justifyContent: 'space-between',
     paddingVertical: 4,
   },
-  toggleLabel: {color: '#e6edf3', fontSize: 15, flex: 1, paddingRight: 12},
+  toggleLabel: {color: t.text, fontSize: 15, flex: 1, paddingRight: 12},
   /* Theme selector options */
   themeOption: {
     flex: 1,
@@ -1287,33 +1257,22 @@ const s = StyleSheet.create({
     gap: 6,
     paddingVertical: 12,
     borderRadius: 10,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
   },
   themeOptionActive: {
-    borderColor: '#58a6ff',
-    backgroundColor: '#161b22',
+    borderColor: t.accent,
+    backgroundColor: t.bgSurface,
   },
   themeOptionLabel: {
-    color: '#8b949e',
+    color: t.textSecondary,
     fontSize: 14,
     fontWeight: '600',
   },
   themeOptionLabelActive: {
-    color: '#58a6ff',
+    color: t.accent,
   },
-  saveBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: '#238636',
-    paddingVertical: 14,
-    borderRadius: 10,
-    marginTop: 12,
-  },
-  saveBtnText: {color: '#fff', fontWeight: '700', fontSize: 16},
   /* Modal */
   modalOverlay: {
     flex: 1,
@@ -1324,14 +1283,14 @@ const s = StyleSheet.create({
   },
   modalCard: {
     width: '100%',
-    backgroundColor: '#161b22',
+    backgroundColor: t.bgSurface,
     borderRadius: 12,
     padding: 16,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
   },
   modalTitle: {
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 18,
     fontWeight: '700',
     marginBottom: 12,
@@ -1356,13 +1315,13 @@ const s = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 16,
-    backgroundColor: '#0d1117',
+    backgroundColor: t.bg,
     borderWidth: 1,
-    borderColor: '#21262d',
+    borderColor: t.border,
   },
   filterBtnActive: {
-    backgroundColor: '#1f6feb',
-    borderColor: '#1f6feb',
+    backgroundColor: t.userBubble,
+    borderColor: t.userBubble,
   },
   filterBtnFreeActive: {
     backgroundColor: '#238636',
@@ -1377,12 +1336,12 @@ const s = StyleSheet.create({
     borderColor: '#0d9488',
   },
   filterBtnText: {
-    color: '#8b949e',
+    color: t.textSecondary,
     fontSize: 12,
     fontWeight: '600',
   },
   filterBtnTextActive: {
-    color: '#fff',
+    color: t.accentText,
   },
   freeBadge: {
     backgroundColor: '#238636',
@@ -1391,7 +1350,7 @@ const s = StyleSheet.create({
     borderRadius: 4,
   },
   freeBadgeText: {
-    color: '#fff',
+    color: t.accentText,
     fontSize: 10,
     fontWeight: '700',
   },
@@ -1460,7 +1419,7 @@ const s = StyleSheet.create({
     fontWeight: '700',
   },
   emptyText: {
-    color: '#8b949e',
+    color: t.textSecondary,
     fontSize: 14,
     textAlign: 'center',
     paddingVertical: 24,
@@ -1471,11 +1430,11 @@ const s = StyleSheet.create({
     gap: 10,
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#21262d',
+    borderBottomColor: t.border,
   },
   modelItemText: {
     flex: 1,
-    color: '#e6edf3',
+    color: t.text,
     fontSize: 15,
   },
   modalCloseBtn: {
@@ -1484,7 +1443,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
   },
   modalCloseText: {
-    color: '#58a6ff',
+    color: t.accent,
     fontWeight: '600',
     fontSize: 15,
   },
@@ -1507,3 +1466,4 @@ const s = StyleSheet.create({
     flex: 1,
   },
 });
+}
