@@ -85,7 +85,17 @@ O agente deve:
 - [x] Branch feature/server-manager criada
 - [x] Documento de design v2 (com decisões)
 - [x] Plano de continuidade (este arquivo)
-- [ ] Phase 1 — Foundation (MMKV, DB modules, migration)
+- [x] **Phase 1 — Foundation** (MMKV + DB modules + migration + services)
+  - `react-native-mmkv@4.3.2` + `react-native-get-random-values@1.11.0` instalados
+  - `src/types/index.ts` — ServerEntry, ModelEntry, AppSettingsV2, ServerFormat, KeyRotationStrategy, ModelRole
+  - `src/data/keychainDb.ts` — multi-key no Keychain (serverId-keyIndex)
+  - `src/data/serverDb.ts` — CRUD ServerEntry + cascade delete + createServer
+  - `src/data/modelDb.ts` — CRUD ModelEntry + syncModelsFromFetch (add/update/hidden)
+  - `src/data/appSettings.ts` — migration legado → V2 + load/saveSettingsV2
+  - `src/services/ServerService.ts` — URL/auth builders + fetchModels + 11 presets + imageGen builders
+  - `src/services/KeyRotation.ts` — single/round-robin/failover + cooldown 60s
+  - `src/services/ImageGenService.ts` — generateImage (OpenAI/Gemini/Pollinations)
+  - `tsc --noEmit` passa sem erros
 - [ ] Phase 2 — Onboarding
 - [ ] Phase 3 — Model Picker
 - [ ] Phase 4 — Settings Redesign
