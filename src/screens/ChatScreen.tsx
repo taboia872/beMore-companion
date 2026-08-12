@@ -1275,7 +1275,11 @@ function getMdStyle(t: ThemeColors) {
     em: {color: t.text, fontStyle: 'italic'},
     strong: {color: t.text, fontWeight: '700'},
     text: {color: t.text},
-    // Tabela — fundo e bordas visíveis em ambos os temas
+    // Tabela — fundo e bordas visíveis em ambos os temas.
+    // IMPORTANTE: a lib usa borderColor: '#000000' no estilo padrão de tr/td,
+    // que é um shorthand que sobrescreve borderBottomColor/borderRightColor.
+    // Por isso usamos borderColor (não as versões direcionais) para garantir
+    // que a cor do tema tenha precedência.
     table: {
       borderWidth: 1,
       borderColor: t.tableBorder,
@@ -1283,20 +1287,26 @@ function getMdStyle(t: ThemeColors) {
       overflow: 'hidden',
       marginVertical: 8,
     },
-    tr: {borderBottomWidth: 1, borderBottomColor: t.tableBorder},
+    tr: {
+      borderBottomWidth: 1,
+      borderColor: t.tableBorder,
+      flexDirection: 'row',
+    },
     th: {
+      flex: 1,
+      padding: 5,
+      borderRightWidth: 1,
+      borderColor: t.tableBorder,
+      backgroundColor: t.tableHeaderBg,
       color: t.text,
       fontWeight: '700',
-      padding: 6,
-      borderRightWidth: 1,
-      borderRightColor: t.tableBorder,
-      backgroundColor: t.tableHeaderBg,
     },
     td: {
-      color: t.text,
-      padding: 6,
+      flex: 1,
+      padding: 5,
       borderRightWidth: 1,
-      borderRightColor: t.tableBorder,
+      borderColor: t.tableBorder,
+      color: t.text,
     },
   });
 }
