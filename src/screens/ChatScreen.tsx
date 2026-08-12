@@ -223,6 +223,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
   // botão pisque (race condition: scroll animado ainda rolando enquanto
   // isAtBottom já foi setado para true).
   const scrollDownClickRef = useRef(0);
+  // Flag: quando true, o useEffect de messages NÃO faz scrollToEnd.
+  // Setado para true ao enviar uma mensagem do user (o send() faz
+  // scrollToIndex manualmente para alinhar a msg do user ao topo).
+  // Setado para false quando streaming termina (tokens chegam e o
+  // useEffect volta a funcionar normalmente).
+  const suppressAutoScrollRef = useRef(false);
 
   const listRef = useRef<FlatList<Message>>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -237,7 +243,10 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // Pequeno delay p/ garantir que o layout foi atualizado antes do scroll.
     // SÓ rola se o usuário já estiver no bottom — se está lendo mensagens
     // antigas (scrollou para cima), não puxa de volta pra o final.
+    // Também não rola se o suppressAutoScrollRef está ativo (send() faz
+    // scrollToIndex manualmente para alinhar a msg do user ao topo).
     if (!isAtBottom) return;
+    if (suppressAutoScrollRef.current) return;
     const timer = setTimeout(() => {
       listRef.current?.scrollToEnd({animated: false});
     }, 50);
@@ -308,7 +317,12 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     setStreaming(true);
     assistantIdRef.current = assistantId;
 
-    // Alinhamento de nova mensagem ao topo (item 9 da lista de tasks).
+    // Suprime o scrollToEnd automático do useEffect — o send() faz
+    // scrollToIndex manualmente para alinhar a nova mensagem do user
+    // ao TOPO da viewport (em vez de rolar para o final).
+    suppressAutoScrollRef.current = true;
+
+    // Alinhamento de nova mensagem ao topo.
     // Se há conteúdo scrollável (a conversa já preenche a tela), alinha
     // a nova pergunta do user ao TOPO do espaço visível. Se o conteúdo
     // ainda cabe na viewport (início da conversa, sem scroll ativo),
@@ -321,6 +335,10 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
           viewPosition: 0,  // 0 = alinha ao topo
           animated: true,
         });
+      } else {
+        // Primeira mensagem — conteúdo ainda cabe na viewport.
+        // Libera o suppress para o useEffect funcionar normalmente.
+        suppressAutoScrollRef.current = false;
       }
     }, 60);
 
@@ -405,6 +423,9 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     } finally {
       setStreaming(false);
       assistantIdRef.current = null;
+      // Libera o suppress do auto-scroll — da próxima vez que messages
+      // mudar, o useEffect faz scrollToEnd normal se estiver no bottom.
+      suppressAutoScrollRef.current = false;
     }
   };
 
@@ -801,12 +822,13 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
     // Tag de status so aparece durante o "pensando". Assim que o modelo
     // comeca a responder (status streaming), a tag some e so fica o texto
     // sendo escrito — evita "Processando..." concorrendo com o proprio output.
+    const isOnline = settings.llm.provider !== 'local';
     const statusLabel =
       item.status === 'thinking'
-        ? 'Pensando...'
-        : item.status === 'streaming'
-          ? null  // token-a-token não precisa de label — o texto aparecendo já é o feedback
-          : null;
+        ? isOnline
+          ? null  // online: só 3 pontinhos (TypingDots abaixo)
+          : 'Pensando...'
+        : null;
     const expanded = item.id ? expandedThinking.has(item.id) : false;
     const showThinkingToggle = !!item.thinking && item.thinking.trim().length > 0;
 
@@ -822,10 +844,10 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
                 : s.bubbleBot,
           ]}>
         {/* status de geração — feedback de "pensando" */}
-        {statusLabel && (
+        {item.status === 'thinking' && (
           <View style={s.statusRow}>
-            <ActivityIndicator size="small" color={theme.accent} />
-            <Text style={s.statusText}>{statusLabel}</Text>
+            {!isOnline && <ActivityIndicator size="small" color={theme.accent} />}
+            {statusLabel && <Text style={s.statusText}>{statusLabel}</Text>}
             <TypingDots />
           </View>
         )}
@@ -1492,8 +1514,8 @@ function getStyles(t: ThemeColors) {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 2,
-      marginTop: 6,
-      paddingTop: 4,
+      marginTop: 12,
+      paddingTop: 8,
       borderTopWidth: 1,
       borderTopColor: t.border,
       opacity: 0.7,
