@@ -1,28 +1,63 @@
 # Server Manager — Documento de Design
 
+> **Status:** Draft v2 — decisões confirmadas com Juliano (13/ago/2026)
+> **Branch:** `feature/server-manager` (criada a partir do `main` pós-merge)
+
 ## Visão Geral
 
-Substituir a configuração atual (um único `LlmConfig` hardcoded em `AppSettings`) por um **banco de dados interno** que cadastro servidores (endpoints + API keys + formato de comunicação) e um **catálogo persistente de modelos** buscados de cada servidor.
+Substituir a configuração atual (um único `LlmConfig` hardcoded em `AppSettings`) por um **banco de dados interno** que cadastra servidores (endpoints + API keys + formato de comunicação) e um **catálogo persistente de modelos** buscados de cada servidor.
 
-Objetivo: fluxo parecido com OpenRouter/9router — cadastrar servidores, fazer fetch dos modelos uma única vez,.persistir a lista, marcar favoritos, esconder os irrelevantes, corrigir badges manualmente, e selecionar modelos de servers diferentes sem precisar re-fetch.
+Objetivo: fluxo parecido com OpenRouter/9router — cadastrar servidores, fazer fetch dos modelos uma única vez, persistir a lista, marcar favoritos, esconder os irrelevantes, corrigir badges manualmente, e selecionar modelos de servidores diferentes sem precisar re-fetch.
 
 ---
 
-## 1. Arquitetura de Dados
+## 1. Decisões Confirmadas
 
-### 1.1 Tecnologia: MMKV + Keychain (sem SQLite)
+| # | Decisão | Detalhe |
+|---|---|---|
+| 1 | **UUID** (`crypto.randomUUID()`) | Sem risco de colisão. Atualizar o app (overwrite install) preserva os dados — MMKV e Keychain sobrevivem a updates. |
+| 2 | **MMKV para tudo** | Migrar settings + servers + models para `react-native-mmkv`. Abandonar AsyncStorage completamente. |
+| 3 | **Presets expandidos** | Lista maior de presets com URLs corretas, ícones, e flag `hasFreeModels`. Usuário pode cadastrar URL personalizada com ícone custom. Ver seção 3. |
+| 4 | **STT/TTS como FK** | `sttServerId: string \| null` e `ttsServerId: string \| null` — referenciam `ServerEntry.id`. |
+| 5 | **Multi-key + rotação** | Um servidor pode ter múltiplas API keys. Estratégias de rotação: round-robin, failover. Ver seção 5. |
+| 6 | **Badge offline só no ativo** | Não pingar todos os servidores. Só verificar status do servidor do modelo selecionado. Ver seção 6. |
+| 7 | **Sem limite de servidores** | App pessoal — sem cap. |
+| 8 | **Fetch/re-fetch manual** | Botão 🔄 explícito. Sem auto-fetch a cada abertura. |
 
-Para app pessoal com ~2 tabelas e queries simples, SQLite é overkill. Escolha:
+---
 
-- **react-native-mmkv** para metadados de servers e models (JSON serializado, síncrono, ultra rápido)
-- **react-native-keychain** (já em uso) para API keys — uma entrada por server, keyed por `server.id`
+## 2. Arquitetura de Dados
+
+### 2.1 Tecnologia: MMKV + Keychain (sem SQLite, sem AsyncStorage)
+
+- **react-native-mmkv** para TUDO (settings, servers, models) — JSON serializado, síncrono, ultra rápido
+- **react-native-keychain** para API keys — uma entrada por key, keyed por `bemore-apikey-<serverId>-<keyIndex>`
+- **AsyncStorage** → abandonado. Migration lê o legado uma única vez e migra para MMKV.
+- **react-native-get-random-values** — polyfill para `crypto.randomUUID()` no RN
 
 Notas:
-- MMKV é síncrono (sem `await`), o que simplifica a UI — não precisa de loading states para ler config
-- AsyncStorage permanece para `AppSettings` (theme, systemPrompt, streaming, STT/TTS config) — não precisa migrar tudo
+- MMKV é síncrono (sem `await`) — simplifica a UI, sem loading states para ler config
+- MMKV sobrevive a updates do app (overwrite install) — os dados ficam no sandbox do app
+- Keychain (Android Keystore) também sobrevive a updates — as API keys não se perdem
 - Se o projeto crescer (chats persistidos, histórico), aí sim migrar para op-sqlite
 
-### 1.2 Schema
+### 2.2 Storage Layout
+
+```
+MMKV (single instance):
+  @bemore_settings_v2  → JSON: AppSettingsV2
+  @bemore_servers      → JSON: ServerEntry[]
+  @bemore_models       → JSON: ModelEntry[]
+
+Keychain (Android Keystore):
+  bemore-apikey-<serverId>-<keyIndex>  → apiKey individual
+  (cada servidor pode ter N keys, keyIndex = 0, 1, 2, ...)
+
+AsyncStorage (legado — migrado e abandonado):
+  @bemore_settings  → lido uma vez na migration, nunca mais escrito
+```
+
+### 2.3 Schema
 
 ```typescript
 // src/types/index.ts (extensão)
@@ -30,105 +65,189 @@ Notas:
 /**
  * Formato de comunicação do servidor.
  * - 'openai':    Bearer auth, /v1/chat/completions, /v1/models (padrão)
- * - 'gemini':    Query param ?key=, /v1beta/openai/chat/completions, /v1beta/models
- * - 'ollama':    Sem auth (localhost), /v1/chat/completions, /api/tags (ou /v1/models)
- * - 'custom':    Mesma estrutura OpenAI, mas o usuário define paths manualmente
+ * - 'gemini':    Header x-goog-api-key, /v1beta/openai/chat/completions, /v1beta/models
+ * - 'ollama':    Sem auth (localhost), /v1/chat/completions, /v1/models
+ * - 'custom':    Mesma estrutura OpenAI, mas o usuário pode definir paths
  */
 export type ServerFormat = 'openai' | 'gemini' | 'ollama' | 'custom';
+
+/**
+ * Estratégia de rotação quando um servidor tem múltiplas API keys.
+ * - 'single':    Usa sempre a key ativa (primeira não-exhausted)
+ * - 'round-robin': Alterna entre keys a cada requisição
+ * - 'failover':  Usa a key ativa; se ela falhar (429/401), tenta a próxima
+ */
+export type KeyRotationStrategy = 'single' | 'round-robin' | 'failover';
 
 /**
  * Um servidor cadastrado no app.
  */
 export interface ServerEntry {
-  id: string;           // UUID (crypto.randomUUID() ou react-native-get-random-values)
-  name: string;         // Nome amigável ex: "Minha Ollama", "OpenRouter"
-  baseUrl: string;      // URL base ex: "https://api.groq.com/openai/v1"
-  format: ServerFormat; // Determina método de auth e paths
-  icon?: string;        // Nome do ícone MaterialIcons (preset) ou undefined
-  hasFreeModels?: boolean; // Hint para filtro (pode ser override manual)
-  createdAt: number;    // Date.now()
+  id: string;                    // UUID (crypto.randomUUID())
+  name: string;                  // Nome amigável ex: "Minha Ollama", "OpenRouter"
+  baseUrl: string;               // URL base ex: "https://api.groq.com/openai/v1"
+  format: ServerFormat;          // Determina método de auth e paths
+  icon: string;                  // Nome do ícone MaterialIcons
+  hasFreeModels: boolean;        // Hint para filtro (override manual possível)
+  // Multi-key
+  apiKeyCount: number;           // Quantas keys cadastradas (0 = sem key, ex: Ollama local)
+  keyRotation: KeyRotationStrategy; // Como alternar entre keys
+  activeKeyIndex: number;        // Qual key está em uso agora (0-based)
+  // Metadata
+  createdAt: number;             // Date.now()
   updatedAt: number;
-  // NOTA: apiKey NÃO vive aqui — fica no Keychain, keyed por server.id
+  // NOTA: API keys NÃO vivem aqui — ficam no Keychain, keyed por serverId+keyIndex
 }
 
 /**
  * Um modelo cadastrado (resultado de fetch de /models).
  */
 export interface ModelEntry {
-  id: string;           // UUID do registro
-  serverId: string;     // FK → ServerEntry.id
-  modelId: string;      // ID retornado pela API ex: "llama3", "gpt-4o"
-  displayName?: string;  // Override editável pelo usuário (se vazio, usa modelId)
+  id: string;                    // UUID do registro
+  serverId: string;              // FK → ServerEntry.id
+  modelId: string;               // ID retornado pela API ex: "llama3", "gpt-4o"
+  displayName?: string;          // Override editável pelo usuário (se vazio, usa modelId)
   // Badges/capabilities — auto-detectadas no fetch, editáveis manualmente
   isVision?: boolean;
   isStt?: boolean;
   isTts?: boolean;
   isAnyToAny?: boolean;
-  isFree?: boolean;     // Override manual se a auto-detecção errou
+  isFree?: boolean;              // Override manual se a auto-detecção errou
   // Organização do usuário
-  isFavorite: boolean;  // Aparece em lista de favoritos
-  isHidden: boolean;    // Removido das listas mas não deletado (soft delete)
+  isFavorite: boolean;           // Aparece em lista de favoritos
+  isHidden: boolean;             // Removido das listas mas não deletado (soft delete)
   // Metadata de fetch
-  lastFetchedAt: number; // Date.now() do último /models fetch
+  lastFetchedAt: number;         // Date.now() do último /models fetch
 }
 
 /**
- * Settings que referenciam servers/models por ID.
- * Substitui o LlmConfig solteiro atual.
+ * Settings V2 — tudo em MMKV, referencias por ID.
  */
 export interface AppSettingsV2 {
   // Referências ao servidor/modelo ativos
   activeServerId: string | null;
-  activeModelId: string | null;    // FK → ModelEntry.id
+  activeModelId: string | null;     // FK → ModelEntry.id
   activeSttModelId: string | null;  // FK → ModelEntry.id (override de STT)
   activeTtsModelId: string | null;  // FK → ModelEntry.id (override de TTS)
-  // Servidores override para STT/TTS (opcional — null = usa activeServer)
-  sttServerId?: string | null;
-  ttsServerId?: string | null;
-  // Tudo mais permanece igual
+  // Servidores override para STT/TTS (null = usa activeServer)
+  sttServerId: string | null;
+  ttsServerId: string | null;
+  // Config geral
   systemPrompt: string;
   theme: 'dark' | 'light';
   sttMode: 'on-device' | 'online';
-  sttModelPath?: string;
+  sttModelPath?: string;           // Path no device para modelo Whisper GGUF
   ttsVoice?: string;
   ttsAutoPlay?: boolean;
   streamingEnabled?: boolean;
+  // Flag de migration
+  migrated: boolean;
 }
 ```
 
-### 1.3 Storage Layout
+---
 
+## 3. Presets de Servidores (expandidos)
+
+Lista de presets com URLs corretas, ícones MaterialIcons, e flag de free tier.
+Servidores com **apenas modelos fechados** ou **API paga sem free tier** são excluídos por enquanto.
+
+```typescript
+const SERVER_PRESETS: ServerPreset[] = [
+  // --- Free tier generoso ---
+  {
+    name: 'Google AI Studio',
+    url: 'https://generativelanguage.googleapis.com/v1beta',
+    icon: 'auto-awesome',
+    format: 'gemini',
+    hasFreeModels: true,
+    description: 'Gemini 2.0/2.5 Flash, Pro — free tier generoso',
+  },
+  {
+    name: 'Groq',
+    url: 'https://api.groq.com/openai/v1',
+    icon: 'bolt',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'LPU ultra-rápido. Llama, Mixtral, Whisper STT — free sem cartão',
+  },
+  {
+    name: 'Cerebras',
+    url: 'https://api.cerebras.ai/v1',
+    icon: 'memory',
+    format: 'openai',
+    hasFreeModels: true,
+    description: '1M tokens/dia free. Llama 3.1, Qwen — inference ultra-rápido',
+  },
+  {
+    name: 'SambaNova',
+    url: 'https://api.sambanova.ai/v1',
+    icon: 'developer-board',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'DeepSeek-V3.1, Llama — free tier OpenAI-compatível',
+  },
+  {
+    name: 'OpenRouter',
+    url: 'https://openrouter.ai/api/v1',
+    icon: 'route',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'Agregador — 100s de modelos, vários com :free',
+  },
+  {
+    name: 'AIHorde',
+    url: 'https://oai.aihorde.net/v1',
+    icon: 'groups',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'Crowdsourced — tudo gratuito, modelos da comunidade',
+  },
+  {
+    name: 'Ollama Cloud',
+    url: 'https://ollama.com/v1',
+    icon: 'cloud-queue',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'gemma, gpt-oss, qwen3 — free tier cloud',
+  },
+  {
+    name: 'HuggingFace',
+    url: 'https://router.huggingface.co/v1',
+    icon: 'hub',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'Router HF — modelos open com free tier',
+  },
+  // --- Local (sem API key) ---
+  {
+    name: 'Ollama Local',
+    url: 'http://localhost:11434/v1',
+    icon: 'dns',
+    format: 'ollama',
+    hasFreeModels: true,
+    description: 'Servidor local — modelos GGUF na sua máquina',
+  },
+  {
+    name: 'LM Studio',
+    url: 'http://localhost:1234/v1',
+    icon: 'laptop',
+    format: 'openai',
+    hasFreeModels: true,
+    description: 'Servidor local — qualquer modelo GGUF',
+  },
+];
 ```
-MMKV\Storage:
-  @bemore_servers      → JSON: ServerEntry[]
-  @bemore_models       → JSON: ModelEntry[]
-  @bemore_settings_v2  → JSON: AppSettingsV2
 
-Keychain (Keystore Android):
-  bemore-apikey-<serverId>  → apiKey daquele servidor
-
-AsyncStorage (legado — migrado):
-  @bemore_settings  → migrado para @bemore_settings_v2
-```
-
-### 1.4 Migration Strategy
-
-Na primeira abertura após o update:
-
-1. Ler `@bemore_settings` (AsyncStorage, formato antigo)
-2. Se existir `llm.baseUrl` não-vazio:
-   - Criar um `ServerEntry` com a URL/provider antigos
-   - Migrar a apiKey do Keychain legado (`bemore-apikey-<hostname>` → `bemore-apikey-<newServerId>`)
-   - Criar um `ModelEntry` com o `llm.model` antigo
-   - Setar `activeServerId` e `activeModelId` para os novos IDs
-3. Se NÃO houver settings antigos → fluxo de onboarding (primeira abertura)
-4. Marcar migration como completa (flag em settings_v2)
+**Custom:** usuário pode cadastrar qualquer URL. Ao escolher "Personalizado",
+pode selecionar um ícone da lista de MaterialIcons (picker visual) ou usar
+`'dns'` como default.
 
 ---
 
-## 2. Fluxos de Telas
+## 4. Fluxos de Telas
 
-### 2.1 Onboarding (primeira abertura)
+### 4.1 Onboarding (primeira abertura)
 
 ```
 ┌─────────────────────────┐
@@ -136,7 +255,7 @@ Na primeira abertura após o update:
 │                         │
 │   ████ (logo/icone)      │
 │                         │
-│  Como irá se conectar?  │
+│  Como ira se conectar?  │
 │                         │
 │  ┌─────────────────┐    │
 │  │ ☁ Servidor Online│   │
@@ -150,21 +269,21 @@ Na primeira abertura após o update:
 ```
 
 **Se "Servidor Online":**
-1. Mostrar lista de presets (OpenRouter, Groq, Gemini, NVIDIA, AIHorde...) + "Personalizado"
-2. Usuário seleciona preset OU digita URL
-3. Campo de API key aparece
+1. Mostrar grid de presets (com ícone, nome, descrição curta)
+2. Usuário seleciona preset OU escolhe "Personalizado" (digita URL + escolhe ícone)
+3. Campo(s) de API key aparece(m) — pode adicionar mais de uma (ver seção 5)
 4. Botão "Buscar modelos" → fetch `/models`
-5. Modelos aparecem em lista → usuário marca favoritos
+5. Modelos aparecem em lista → usuário marca favoritos, esconde os que não quer
 6. "Concluir" → salva server + models + seta active
 
 **Se "Servidor Local":**
-1. Campo de URL (default: `http://localhost:11434/v1`)
+1. Campo de URL (default conforme preset: `http://localhost:11434/v1`)
 2. Sem API key (Ollama local não precisa)
-3. Botão "Buscar modelos" → fetch `/v1/models` (ou `/api/tags`)
+3. Botão "Buscar modelos" → fetch
 4. Modelos aparecem → marca favoritos
 5. "Concluir"
 
-### 2.2 Tela de Seleção de Modelo (no chat)
+### 4.2 Tela de Seleção de Modelo (no chat)
 
 ```
 ┌───────────────────────────┐
@@ -191,23 +310,32 @@ Na primeira abertura após o update:
 
 Filtros no topo do modal:
 - **Todos** | **⭐ Favoritos** | **FREE** | **Visão** | **STT** | **TTS**
-- Ordenação agrupada por servidor (como OpenRouter), não lista plana
+- Ordenação agrupada por servidor (como OpenRouter)
 
-Ações por modelo (swipe ou menu de 3 pontos):
+Ações por modelo (menu de 3 pontos):
 - ⭐ Favoritar/Desfavoritar
 - 👁 Mostrar/Ocultar (hidden)
 - ✏️ Editar badges (corrigir visão/STT/TTS/free)
 - 🗑 Deletar (remove do catálogo — re-fetch traz de volta)
-- 🔄 Re-fetch deste servidor (atualiza lista de modelos do server)
+- 🔄 Re-fetch deste servidor (atualiza lista de modelos do server inteiro)
 
-### 2.3 Tela de Settings — Seção "Servidores"
+### 4.3 Badge Offline — somente modelo ativo
+
+- **NÃO** fazer health check de todos os servidores ao abrir o app
+- **Somente** quando o usuário tenta usar o modelo ativo e a requisição falha:
+  - Mostrar badge "offline" no botão de modelo do header do chat
+  - Badge some assim que a próxima requisição tiver sucesso
+- Privacidade: o app não "anuncia" a todos os servidores que está ativo
+- Implementação: native do XHR error handling do LlmService (já existe), só adicionar flag visual
+
+### 4.4 Settings — Seção "Servidores"
 
 ```
 ┌─────────────────────────────┐
 │  Configurações              │
 │                             │
 │  ┌─ Servidores ───────────┐ │
-│  │ Eis: 2 servidores      │ │
+│  │ Ex: 2 servidores       │ │
 │  │                        │ │
 │  │ ● Minha Ollama     ⚙  │ │  ← tocar abre edição
 │  │   localhost:11434      │ │
@@ -216,6 +344,7 @@ Ações por modelo (swipe ou menu de 3 pontos):
 │  │ ● OpenRouter       ⚙  │ │
 │  │   openrouter.ai       │ │
 │  │   47 modelos (3⭐)     │ │
+│  │   2 API keys (rot: RR) │ │  ← mostra multi-key + estratégia
 │  │                        │ │
 │  │  + Adicionar servidor   │ │
 │  └────────────────────────┘ │
@@ -238,7 +367,15 @@ Ações por modelo (swipe ou menu de 3 pontos):
 │  Nome: [Minha Ollama      ] │
 │  URL:  [http://192.168... ] │
 │  Formato: [Ollama      ▼]  │
-│  API Key: [********      ]  │
+│  Ícone:  [dns          ▼]  │  ← picker visual de MaterialIcons
+│                             │
+│  API Keys (2):              │
+│  ┌───────────────────────┐  │
+│  │ Key 1: ●●●●●●●● [↓]  │  │  ← ativa (● = dots, não mostra a key)
+│  │ Key 2: ●●●●●●●● [×]  │  │  ← remover
+│  │ [+ Adicionar key]      │  │
+│  └───────────────────────┘  │
+│  Rotação: [Round-robin ▼]  │
 │                             │
 │  Modelos (3):               │
 │  ┌───────────────────────┐  │
@@ -253,32 +390,151 @@ Ações por modelo (swipe ou menu de 3 pontos):
 
 ---
 
-## 3. Módulos de Código (estrutura proposta)
+## 5. Multi-Key + Rotação de API Keys
+
+### 5.1 Motivação
+
+Serviços free tier têm rate limits (ex: Groq 30 RPM, Cerebras 30 RPM). Ter
+múltiplas API keys do mesmo serviço permite dobrar/triplicar a quota efetiva.
+
+### 5.2 Storage
+
+Cada key é armazenada individualmente no Keychain:
+```
+bemore-apikey-<serverId>-0  → primeira key
+bemore-apikey-<serverId>-1  → segunda key
+bemore-apikey-<serverId>-2  → terceira key
+```
+
+O `ServerEntry` rastreia `apiKeyCount` e `activeKeyIndex` (qual está em uso).
+
+### 5.3 Estratégias de Rotação
+
+```typescript
+export type KeyRotationStrategy = 'single' | 'round-robin' | 'failover';
+
+/**
+ * Retorna a API key a usar para a próxima requisição.
+ */
+function getKeyForRequest(server: ServerEntry): string {
+  switch (server.keyRotation) {
+    case 'single':
+      // Sempre usa activeKeyIndex
+      return loadApiKeyFromKeychain(server.id, server.activeKeyIndex);
+
+    case 'round-robin':
+      // Alterna a cada chamada: 0 → 1 → 2 → 0 → 1 → ...
+      const nextIndex = (server.activeKeyIndex + 1) % server.apiKeyCount;
+      updateServer({...server, activeKeyIndex: nextIndex});
+      return loadApiKeyFromKeychain(server.id, server.activeKeyIndex);
+
+    case 'failover':
+      // Usa a ativa. Se falhar (429/401), tenta a próxima não-exhausted.
+      // Implementado no LlmService via retry:
+      //   1. Tentar com key ativa
+      //   2. Se 429/401 → marcar key como "exhausted" (timestamp + cooldown)
+      //   3. Avançar activeKeyIndex para próxima
+      //   4. Retriar com nova key
+      //   5. Se todas exhausted → erro "Todas as API keys deste servidor
+      //      atingiram o rate limit. Aguarde ou adicione mais keys."
+      return loadApiKeyFromKeychain(server.id, server.activeKeyIndex);
+  }
+}
+```
+
+### 5.4 Failover — Cooldown de Keys Exhausted
+
+```typescript
+// Em memória (não persistido) — reseta ao reiniciar o app
+const exhaustedKeys: Map<string, number> = new Map();
+// key: `${serverId}-${keyIndex}`, value: Date.now() do cooldown
+
+function isKeyExhausted(serverId: string, keyIndex: number): boolean {
+  const key = `${serverId}-${keyIndex}`;
+  const exhaustedAt = exhaustedKeys.get(key);
+  if (!exhaustedAt) return false;
+  // Cooldown de 60s — depois tenta de novo
+  if (Date.now() - exhaustedAt > 60_000) {
+    exhaustedKeys.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function markKeyExhausted(serverId: string, keyIndex: number): void {
+  exhaustedKeys.set(`${serverId}-${keyIndex}`, Date.now());
+}
+```
+
+### 5.5 UI para Multi-Key
+
+No `ServerEditorScreen`:
+- Lista de keys numeradas (mascaradas: `●●●●●●●●`)
+- Botão para adicionar nova key
+- Botão (×) para remover key individual
+- Dropdown de estratégia de rotação
+- Indicador visual de qual key está ativa (●)
+- Se failover: mostrar quais keys estão em cooldown (cinza + timestamp)
+
+---
+
+## 6. Migration Strategy
+
+Na primeira abertura após o update:
+
+1. Verificar se `migrated === true` em settings_v2 → se sim, pular migration
+2. Ler `@bemore_settings` do **AsyncStorage** (formato antigo legado)
+3. Se existir `llm.baseUrl` não-vazio:
+   - Criar um `ServerEntry` com:
+     - `id`: novo UUID
+     - `name`: derivado do hostname ou "Servidor migrado"
+     - `baseUrl`: do `llm.baseUrl` antigo
+     - `format`: detectar (`gemini` se googleapis, `ollama` se localhost, senão `openai`)
+     - `icon`: matching preset ou `'dns'`
+     - `apiKeyCount`: 1, `keyRotation`: `'single'`, `activeKeyIndex`: 0
+   - Migrar a apiKey do Keychain legado (`bemore-apikey-<hostname>`) → `bemore-apikey-<newServerId>-0`
+   - Criar um `ModelEntry` com o `llm.model` antigo (único modelo, favorito)
+   - Setar `activeServerId` e `activeModelId` para os novos IDs
+4. Se `sttServerOverride` não-vazio → criar outro `ServerEntry` para STT, setar `sttServerId`
+5. Mesmo para `ttsServerOverride` → `ttsServerId`
+6. Migrar `systemPrompt`, `theme`, `sttMode`, `sttModelPath`, `ttsVoice`, `ttsAutoPlay`, `streamingEnabled`
+7. Setar `migrated: true`
+8. Salvar tudo em MMKV (settings_v2 + servers + models)
+9. **NÃO** limpar AsyncStorage ainda — manter como backup por 1 versão
+
+---
+
+## 7. Módulos de Código (estrutura proposta)
 
 ```
 src/
   data/
-    appSettings.ts        → migration + compat layer (legado)
-    serverDb.ts           → CRUD de ServerEntry (MMKV)
-    modelDb.ts            → CRUD de ModelEntry (MMKV)
-    serverKeychain.ts     → API keys per-server (Keychain, migra do appSettings.ts atual)
+    appSettings.ts         → MIGRATION + compat layer (lê legado, escreve V2 em MMKV)
+    serverDb.ts            → CRUD de ServerEntry (MMKV)
+    modelDb.ts             → CRUD de ModelEntry (MMKV)
+    keychainDb.ts           → Multi-key CRUD no Keychain (substitui appSettings.ts atual)
   services/
-    ServerService.ts     → fetchModels(server), buildChatUrl(server), getReasoningFormat(server)
-    LlmService.ts         → refactor: recebe ServerEntry + ModelEntry em vez de LlmConfig
-    SttService.ts         →_EXISTE
-    SttOnlineService.ts   → ajusta para usar ServerEntry/ModelEntry
-    TtsService.ts         → ajusta para usar ServerEntry/ModelEntry
+    ServerService.ts       → fetchModels(server), buildChatUrl(server), buildAuthHeaders(server)
+    KeyRotation.ts         → Lógica de rotação/failover de API keys
+    LlmService.ts          → refactor: recebe ServerEntry + ModelEntry + apiKey em vez de LlmConfig
+    SttService.ts          → existe
+    SttOnlineService.ts    → ajusta para ServerEntry/ModelEntry
+    TtsService.ts          → ajusta para ServerEntry/ModelEntry
   screens/
-    ChatScreen.tsx        → header tem botão de modelo que abre ModelPickerModal
-    SettingsScreen.tsx    → seção "Servidores" substitui card "Modelo de Linguagem"
-    OnboardingScreen.tsx  → NOVO — primeira abertura
-    ServerEditorScreen.tsx → NOVO — editar um servidor
-    ModelPickerModal.tsx  → NOVO — lista de modelos agrupada por servidor
+    ChatScreen.tsx         → header com botão de modelo → ModelPickerModal
+    SettingsScreen.tsx     → seção "Servidores" substitui card "Modelo de Linguagem"
+    OnboardingScreen.tsx   → NOVO — primeira abertura
+    ServerEditorScreen.tsx → NOVO — editar servidor + multi-key
+    ModelPickerModal.tsx   → NOVO — lista de modelos agrupada por servidor
   types/
-    index.ts              → extendido com ServerEntry, ModelEntry, AppSettingsV2
+    index.ts               → ServerEntry, ModelEntry, AppSettingsV2, ServerFormat, KeyRotationStrategy
+  utils/
+    modelCapabilities.ts   → badge detection (já existe, reutilizado no fetch)
+    modelName.ts           → shortModelName (já existe)
+    theme.ts               → (já existe)
 ```
 
-### 3.1 serverDb.ts (pseudo-código)
+### 7.1 serverDb.ts (esboço)
 
 ```typescript
 import { MMKV } from 'react-native-mmkv';
@@ -299,132 +555,135 @@ export function getServer(id: string): ServerEntry | null {
 export function saveServer(server: ServerEntry): void {
   const servers = getAllServers();
   const idx = servers.findIndex(s => s.id === server.id);
-  if (idx >= 0) servers[idx] = server;
-  else servers.push(server);
+  const updated = {...server, updatedAt: Date.now()};
+  if (idx >= 0) servers[idx] = updated;
+  else servers.push(updated);
   storage.set(SERVERS_KEY, JSON.stringify(servers));
 }
 
 export function deleteServer(id: string): void {
   // Cascade: deleta todos os ModelEntry com serverId === id
   deleteModelsByServer(id);
-  // Deleta a API key do Keychain
-  resetApiKeyForServer(id);
+  // Deleta TODAS as API keys do Keychain para este servidor
+  const server = getServer(id);
+  if (server) {
+    for (let i = 0; i < server.apiKeyCount; i++) {
+      resetApiKey(id, i);
+    }
+  }
   // Remove da lista
   const servers = getAllServers().filter(s => s.id !== id);
   storage.set(SERVERS_KEY, JSON.stringify(servers));
 }
 ```
 
-### 3.2 modelDb.ts (pseudo-código)
+### 7.2 keychainDb.ts (multi-key)
 
 ```typescript
-const MODELS_KEY = '@bemore_models';
+import * as Keychain from 'react-native-keychain';
+import { serverKey } from '../data/appSettings'; // reutiliza ou refatora
 
-export function getAllModels(): ModelEntry[] {
-  const raw = storage.getString(MODELS_KEY);
-  return raw ? JSON.parse(raw) : [];
+const KEY_PREFIX = 'bemore-apikey-';
+
+export async function loadApiKey(serverId: string, keyIndex: number): Promise<string> {
+  try {
+    const key = `${KEY_PREFIX}${serverId}-${keyIndex}`;
+    const creds = await Keychain.getInternetCredentials(key);
+    return creds?.password ?? '';
+  } catch { return ''; }
 }
 
-export function getModelsByServer(serverId: string): ModelEntry[] {
-  return getAllModels().filter(m => m.serverId === serverId);
+export async function saveApiKey(serverId: string, keyIndex: number, apiKey: string): Promise<void> {
+  if (!apiKey) { await resetApiKey(serverId, keyIndex); return; }
+  const key = `${KEY_PREFIX}${serverId}-${keyIndex}`;
+  await Keychain.setInternetCredentials(key, 'apiKey', apiKey);
 }
 
-export function getVisibleModels(): ModelEntry[] {
-  return getAllModels().filter(m => !m.isHidden);
-}
-
-export function getFavoriteModels(): ModelEntry[] {
-  return getAllModels().filter(m => m.isFavorite && !m.isHidden);
-}
-
-export function saveModel(model: ModelEntry): void { /* upsert */ }
-export function deleteModel(id: string): void { /* remove */ }
-
-/**
- * Recebe lista de modelIds do fetch e sincroniza com o catálogo:
- * - Novos modelIds → cria ModelEntry com badges auto-detectadas
- * - Existentes → atualiza lastFetchedAt
- * - modelIds que sumiram da API → marca isHidden (não deleta)
- */
-export function syncModelsFromFetch(serverId: string, fetchedIds: string[]): void {
-  const existing = getModelsByServer(serverId);
-  const existingIds = new Set(existing.map(m => m.modelId));
-  const fetchedSet = new Set(fetchedIds);
-
-  // Novos: cria entries
-  for (const id of fetchedIds) {
-    if (!existingIds.has(id)) {
-      const entry: ModelEntry = {
-        id: uuid(),
-        serverId,
-        modelId: id,
-        isFavorite: false,
-        isHidden: false,
-        isVision: detectVision(id),
-        isStt: detectStt(id),
-        isTts: detectTts(id),
-        isAnyToAny: detectAnyToAny(id),
-        lastFetchedAt: Date.now(),
-      };
-      saveModel(entry);
-    }
-  }
-
-  // Sumiram: marca hidden
-  for (const m of existing) {
-    if (!fetchedSet.has(m.modelId) && !m.isHidden) {
-      m.isHidden = true;
-      saveModel(m);
-    }
-  }
-
-  // Existentes: atualiza timestamp
-  for (const m of existing) {
-    if (fetchedSet.has(m.modelId)) {
-      m.lastFetchedAt = Date.now();
-      saveModel(m);
-    }
-  }
+export async function resetApiKey(serverId: string, keyIndex: number): Promise<void> {
+  try {
+    await Keychain.resetInternetCredentials({server: `${KEY_PREFIX}${serverId}-${keyIndex}`});
+  } catch { /* no-op */ }
 }
 ```
 
-### 3.3 ServerService.ts (consolida lógica de formato)
+### 7.3 KeyRotation.ts
 
 ```typescript
-import { ServerEntry, ServerFormat } from '../types';
+import { ServerEntry } from '../types';
+import { loadApiKey } from './keychainDb';
+import { saveServer } from './serverDb';
 
-export function buildModelsUrl(server: ServerEntry): { url: string; useQueryParamKey: boolean } {
+const exhaustedKeys = new Map<string, number>();
+
+export async function getKeyForRequest(server: ServerEntry): Promise<string> {
+  switch (server.keyRotation) {
+    case 'single':
+      return loadApiKey(server.id, server.activeKeyIndex);
+
+    case 'round-robin': {
+      const next = (server.activeKeyIndex + 1) % server.apiKeyCount;
+      saveServer({...server, activeKeyIndex: next});
+      return loadApiKey(server.id, next);
+    }
+
+    case 'failover': {
+      // Procura primeira key não-exhausted a partir do índice ativo
+      for (let i = 0; i < server.apiKeyCount; i++) {
+        const idx = (server.activeKeyIndex + i) % server.apiKeyCount;
+        if (!isKeyExhausted(server.id, idx)) {
+          if (idx !== server.activeKeyIndex) {
+            saveServer({...server, activeKeyIndex: idx});
+          }
+          return loadApiKey(server.id, idx);
+        }
+      }
+      throw new Error('Todas as API keys deste servidor estão em cooldown (rate limit).');
+    }
+  }
+}
+
+export function isKeyExhausted(serverId: string, keyIndex: number): boolean {
+  const key = `${serverId}-${keyIndex}`;
+  const at = exhaustedKeys.get(key);
+  if (!at) return false;
+  if (Date.now() - at > 60_000) { exhaustedKeys.delete(key); return false; }
+  return true;
+}
+
+export function markKeyExhausted(serverId: string, keyIndex: number): void {
+  exhaustedKeys.set(`${serverId}-${keyIndex}`, Date.now());
+}
+```
+
+### 7.4 ServerService.ts
+
+```typescript
+import { ServerEntry } from '../types';
+
+export function buildModelsUrl(server: ServerEntry): { url: string; useHeader: boolean } {
   const clean = server.baseUrl.replace(/\/+$/, '');
   switch (server.format) {
     case 'gemini':
-      return { url: `${clean}/models`, useQueryParamKey: true };
-    case 'openrouter':
-      return { url: 'https://openrouter.ai/api/v1/models', useQueryParamKey: false };
-    case 'ollama':
-      // Ollama suporta /v1/models (OpenAI-compat) e /api/tags (nativo)
-      return { url: `${clean}/models`, useQueryParamKey: false };
-    default: // openai, custom
-      return { url: `${clean}/models`, useQueryParamKey: false };
+      return { url: `${clean}/models`, useHeader: true };
+    // OpenRouter tem endpoint público mas com auth retorna pricing info
+    default:
+      return { url: `${clean}/models`, useHeader: false };
   }
 }
 
 export function buildChatUrl(server: ServerEntry): string {
   const clean = server.baseUrl.replace(/\/+$/, '');
-  if (server.format === 'gemini') {
-    return `${clean}/openai/chat/completions`;
-  }
+  if (server.format === 'gemini') return `${clean}/openai/chat/completions`;
   return `${clean}/chat/completions`;
 }
 
 export function buildAuthHeaders(server: ServerEntry, apiKey: string): Record<string, string> {
-  if (server.format === 'gemini') return {}; // Gemini usa ?key= na URL
   if (!apiKey) return {};
+  if (server.format === 'gemini') return { 'x-goog-api-key': apiKey }; // FIX: header em vez de query param
   return { 'Authorization': `Bearer ${apiKey}` };
 }
 
 export function getReasoningFormat(server: ServerEntry): string | null {
-  // Lógica que hoje está em LlmService.getReasoningFormat()
-  // mas baseada em ServerEntry em vez de string URL
   if (server.format === 'ollama' || isLocalServer(server.baseUrl)) return null;
   if (server.format === 'gemini') return null;
   const url = server.baseUrl.toLowerCase();
@@ -435,66 +694,34 @@ export function getReasoningFormat(server: ServerEntry): string | null {
 }
 
 export async function fetchModels(server: ServerEntry, apiKey: string): Promise<string[]> {
-  const { url, useQueryParamKey } = buildModelsUrl(server);
-  let finalUrl = url;
+  const { url, useHeader } = buildModelsUrl(server);
   const headers: Record<string, string> = {};
-  if (!useQueryParamKey && apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
-  }
-  if (useQueryParamKey && apiKey) {
-    finalUrl = `${url}?key=${encodeURIComponent(apiKey)}`;
-  }
-  const res = await fetch(finalUrl, { headers });
+  if (useHeader && apiKey) headers['x-goog-api-key'] = apiKey;
+  else if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+  const res = await fetch(url, { headers });
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   const models = data?.data ?? data?.models ?? [];
   return models
     .map((m: any) => (m.id ?? m.name ?? '').replace(/^models\//, ''))
     .filter((s: string) => s.length > 0)
-    .sort((a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    .sort((a: string, b: string) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
 }
 ```
 
 ---
 
-## 4. Mudanças no LlmService
+## 8. Security Fixes
 
-O `streamResponse()` e `fetchBatch()` hoje recebem `LlmConfig` (baseUrl, apiKey, model, provider). Com o Server Manager, passam a receber:
+### 8.1 Gemini API Key — header em vez de query param
 
-```typescript
-interface LlmRequest {
-  server: ServerEntry;  // baseUrl, format
-  apiKey: string;       // lida do Keychain pelo chamador
-  modelId: string;       // model.modelId do ModelEntry ativo
-}
-```
+**Problema atual:** `?key=...` na URL — API key vaza em logs, crash reports, histórico.
 
-A função `buildChatUrl()` e `getReasoningFormat()` migram de `LlmService` para `ServerService`.
+**Fix:** Gemini suporta header `x-goog-api-key: <key>`. Usar sempre o header,
+nunca a query param. Implementado em `buildAuthHeaders()` e `fetchModels()`.
 
-O `sanitizeContext()` e `createThinkingParser()` não mudam — são independentes do servidor.
-
----
-
-## 5. Fix de Segurança: Gemini API Key na URL
-
-**Problema atual:** API key do Gemini vai na URL como query param (`?key=...`).
-
-**Fix:** O Gemini também aceita header `x-goog-api-key: <key>`. Mudar `buildModelsUrl` e `buildChatUrl` para usar o header em vez de query param:
-
-```typescript
-if (server.format === 'gemini' && apiKey) {
-  headers['x-goog-api-key'] = apiKey;
-  // NÃO colocar ?key= na URL
-}
-```
-
-Isso evita que a API key apareça em logs de rede, URLs de crash reports, etc.
-
----
-
-## 6. Fix de Segurança: Validação de URL
-
-Adicionar validação no cadastro de servidor:
+### 8.2 Validação de URL no cadastro
 
 ```typescript
 export function validateServerUrl(url: string): { valid: boolean; error?: string } {
@@ -505,7 +732,7 @@ export function validateServerUrl(url: string): { valid: boolean; error?: string
       return { valid: false, error: 'Protocolo deve ser http ou https' };
     }
     if (parsed.protocol === 'http:' && !isLocalAddress(parsed.hostname)) {
-      return { valid: false, error: 'HTTP só permitido para servidores locais (localhost/LAN). Use HTTPS.' };
+      return { valid: false, error: 'HTTP so permitido para servidores locais. Use HTTPS.' };
     }
     return { valid: true };
   } catch {
@@ -525,103 +752,89 @@ function isLocalAddress(hostname: string): boolean {
 }
 ```
 
+### 8.3 Network Security Config — adicionar ollama.com
+
+Adicionar `<domain includeSubdomains="true">ollama.com</domain>` ao
+`network_security_config.xml` (forçar HTTPS para Ollama Cloud).
+
+E adicionar os novos provedores que têm HTTPS obrigatório:
+- `cerebras.ai`
+- `sambanova.ai`
+- `huggingface.co`
+
+### 8.4 API keys TextArea — mascarar sempre
+
+No `ServerEditorScreen`, as keys são exibidas como `●●●●●●●●` (nunca plaintext).
+Botão违法违规 "mostrar" opcional (toggle `secureTextEntry`), mas default é oculto.
+
 ---
 
-## 7. Network Security Config — Atualização
-
-O `network_security_config.xml` atual lista domínios hardcoded. Com o Server Manager, usuários podem cadastrar servidores em domínios não listados. Opções:
-
-**A) Adicionar `ollama.com` à lista de cleartext-proibido** (já que Ollama Cloud HTTPS):
-```xml
-<domain includeSubdomains="true">ollama.com</domain>
-```
-
-**B) Manter abordagem atual** — o usuário pode cadastrar qualquer URL HTTPS, e o cleartext só é permitido porque o base-config permite tudo. O filtro de validação de URL (item 6) já bloqueia HTTP não-local no nível do app.
-
-Recomendo **A+B**: adicionar ollama.com ao XML + manter validação no app.
-
----
-
-## 8. Novas Dependências
+## 9. Novas Dependências
 
 ```
 npm install react-native-mmkv react-native-get-random-values
 ```
 
-- `react-native-mmkv`: storage síncrono para servers/models
+- `react-native-mmkv`: storage síncrono para settings + servers + models
 - `react-native-get-random-values`: polyfill para `crypto.randomUUID()` no RN
 
 Não precisa de SQLite, WatermelonDB, ou Realm para este escopo.
 
 ---
 
-## 9. Ordem de Implementação (phases)
+## 10. Ordem de Implementação (phases)
 
 ### Phase 1 — Foundation (sem mudanças visíveis)
 1. Instalar `react-native-mmkv` + `react-native-get-random-values`
-2. Criar `src/data/serverDb.ts`, `src/data/modelDb.ts`, `src/data/serverKeychain.ts`
+2. Criar `src/data/serverDb.ts`, `src/data/modelDb.ts`, `src/data/keychainDb.ts`
 3. Criar `src/services/ServerService.ts` (consolida lógica de URL/auth)
-4. Criar migration em `appSettings.ts` (legado → V2)
-5. Tests: migration funciona, CRUD de servers/models funciona
+4. Criar `src/services/KeyRotation.ts`
+5. Criar migration em `appSettings.ts` (legado AsyncStorage → MMKV V2)
+6. Test: migration funciona, CRUD de servers/models funciona, multi-key funciona
 
 ### Phase 2 — UI: Onboarding
-6. Criar `OnboardingScreen.tsx`
-7. App.tsx: se não há servers → mostra OnboardingScreen, senão ChatScreen
-8. Onboarding cadastra primeiro servidor + fetch modelos + marca favoritos
+7. Criar `OnboardingScreen.tsx`
+8. App.tsx: se `!settings.migrated` ou sem servers → OnboardingScreen
+9. Onboarding: grid de presets → cadastro → fetch modelos → favoritos → concluir
 
 ### Phase 3 — UI: Model Picker no Chat
-9. Criar `ModelPickerModal.tsx` (lista agrupada por servidor, filtros, swipe actions)
-10. ChatScreen: botão no header abre ModelPickerModal
-11. Trocar modelo = trocar activeModelId em settings
+10. Criar `ModelPickerModal.tsx` (lista agrupada por servidor, filtros, ações)
+11. ChatScreen: botão no header abre ModelPickerModal
+12. Trocar modelo = trocar activeModelId em settings
+13. Badge offline no modelo ativo (quando XHR falha)
 
 ### Phase 4 — UI: Settings Redesign
-12. SettingsScreen: novo card "Servidores" (lista de servers + adicionar)
-13. Criar `ServerEditorScreen.tsx` (editar server, ver/editar models, re-fetch, deletar)
-14. Remover o card "Modelo de Linguagem" antigo
+14. SettingsScreen: novo card "Servidores" (lista + adicionar)
+15. Criar `ServerEditorScreen.tsx` (editar server, multi-key, re-fetch, deletar)
+16. Remover card "Modelo de Linguagem" antigo
+17. STT/TTS settings: selecionar de lista de servers/models cadastrados
 
 ### Phase 5 — Refactor dos Services
-15. LlmService: recebe `LlmRequest` (server + apiKey + modelId) em vez de `LlmConfig`
-16. SttOnlineService: mesmo refactor
-17. TtsService: mesmo refactor
-18. Remover `LlmConfig` do types/index.ts (ou marcar como deprecated)
+18. LlmService: recebe `ServerEntry + apiKey + modelId` em vez de `LlmConfig`
+19. Integrar KeyRotation no LlmService (failover automático em 429/401)
+20. SttOnlineService: mesmo refactor
+21. TtsService: mesmo refactor
+22. Remover `LlmConfig` do types/index.ts (deprecated → removido)
 
 ### Phase 6 — Security Fixes
-19. Gemini: header `x-goog-api-key` em vez de query param
-20. Validação de URL no cadastro
-21. Adicionar `ollama.com` ao network_security_config.xml
+23. Gemini: header `x-goog-api-key` em vez de query param
+24. Validação de URL no cadastro
+25. Atualizar `network_security_config.xml` com novos domínios
 
 ### Phase 7 — Polish
-22. Filtros no ModelPickerModal (Favoritos / Free / Visão / STT / TTS)
-23. Editar badges manualmente (corrigir auto-detecção)
-24. Indicador visual de servidor ativo no chat header
-25. Empty states (sem servers, sem models, sem favoritos)
+26. Filtros no ModelPickerModal (Favoritos / Free / Visão / STT / TTS)
+27. Editar badges manualmente (corrigir auto-detecção)
+28. Indicador visual de servidor ativo no chat header
+29. Indicador de keys em cooldown (failover)
+30. Empty states (sem servers, sem models, sem favoritos)
 
 ---
 
-## 10. Decões Pendentes (para revisar amanhã)
+## 11. Decisões Futuras (não bloqueantes)
 
-1. **UUID vs incremental ID?** Recomendo UUID (`crypto.randomUUID()`) — sem risco de colisão, simples.
-
-2. **MMKV vs AsyncStorage para settings?** Recomendo migrar tudo para MMKV (settings + servers + models) e abandonar AsyncStorage. Mas isso é uma mudança maior — pode ser Phase 8 (cleanup).
-
-3. **Manter presets hardcoded?** Sim, mas como sugestões no onboarding (não como lista fechada). O usuário pode cadastrar qualquer URL.
-
-4. **O que acontece com STT/TTS server override?** Hoje é `sttServerOverride: string` (URL). Mudar para `sttServerId: string | null` (FK para ServerEntry). Mais limpo.
-
-5. **Deletar servidor: o que acontece com modelos?** Cascade delete dos ModelEntry + reset da API key. Não pode deletar o servidor ativo sem primeiro trocar para outro (ou voltar para onboarding).
-
-6. **Model ainda visível mas servidor offline?** Mostrar badge "offline" no ModelPickerModal. O usuário tenta usar → erro de rede (já tratado pelo LlmService).
-
-7. **Limite de servidores?** Sem limite — app pessoal. Mas na prática 3-5 servidores é o esperado.
-
-8. **Buscar modelos: re-fetch automático vs manual?** Recomendo MANUAL (botão 🔄). Auto-fetch a cada abertura seria lento e gastaria quota. O catálogo persiste — o usuário só re-fetch quando quer atualizar.
-
----
-
-## 11. Estado Atual desta Branch
-
-- ✅ Merge de `feature/chat-streaming-thinking-ui` → `main` (42 commits)
-- ✅ Branch `feature/server-manager` criada a partir do main
-- 📄 Este documento de design
-
-Próximo passo: implementar Phase 1 (foundation — DB modules) a partir deste documento, após revisão do Juliano.
+- **Chats persistidos:** Salvar histórico de conversas no MMKV ou SQLite? (futuro)
+- **Sync entre dispositivos:** Export/import de configuração via JSON? (futuro)
+- **Compartilhar servidores:** QR code ou link compartilhável? (futuro)
+- **Custom paths para formato 'custom':** Hoje usa paths OpenAI padrão. Se precisar
+  de paths diferentes (ex: Azure OpenAI tem URLs diferentes), adicionar campos
+  `chatPath` e `modelsPath` no `ServerEntry`. (futuro, se需求 surgir)
