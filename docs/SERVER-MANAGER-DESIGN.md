@@ -69,7 +69,21 @@ AsyncStorage (legado — migrado e abandonado):
  * - 'ollama':    Sem auth (localhost), /v1/chat/completions, /v1/models
  * - 'custom':    Mesma estrutura OpenAI, mas o usuário pode definir paths
  */
-export type ServerFormat = 'openai' | 'gemini' | 'ollama' | 'custom';
+export type ServerFormat = 'openai' | 'gemini' | 'ollama' | 'custom' | 'pollinations';
+
+/**
+ * Papel / capability que um modelo pode ter.
+ * - 'chat':     Geração de texto (LLM padrão — chat completions)
+ * - 'vision':   Consumir imagem (input multimodal — image_url no content)
+ * - 'stt':      Speech-to-Text (transcrição de áudio)
+ * - 'tts':      Text-to-Speech (síntese de áudio)
+ * - 'image_gen': Geração de imagem (output — produz imagem a partir de texto)
+ *
+ * Visão vs Image Gen são opostos: Visão CONSUME imagem, Image Gen PRODUZ imagem.
+ * Um modelo pode ter múltiplas capabilities (ex: GPT-4o tem chat + vision).
+ * Image generation tem endpoint/payload diferente de chat (ver ServerService).
+ */
+export type ModelRole = 'chat' | 'vision' | 'stt' | 'tts' | 'image_gen';
 
 /**
  * Estratégia de rotação quando um servidor tem múltiplas API keys.
@@ -112,6 +126,7 @@ export interface ModelEntry {
   isStt?: boolean;
   isTts?: boolean;
   isAnyToAny?: boolean;
+  isImageGen?: boolean;          // Modelo que GERA imagens (output) — diferente de vision (input)
   isFree?: boolean;              // Override manual se a auto-detecção errou
   // Organização do usuário
   isFavorite: boolean;           // Aparece em lista de favoritos
@@ -129,9 +144,11 @@ export interface AppSettingsV2 {
   activeModelId: string | null;     // FK → ModelEntry.id
   activeSttModelId: string | null;  // FK → ModelEntry.id (override de STT)
   activeTtsModelId: string | null;  // FK → ModelEntry.id (override de TTS)
-  // Servidores override para STT/TTS (null = usa activeServer)
+  activeImageGenModelId: string | null;  // FK → ModelEntry.id (geração de imagem)
+  // Servidores override para STT/TTS/ImageGen (null = usa activeServer)
   sttServerId: string | null;
   ttsServerId: string | null;
+  imageGenServerId: string | null;  // Servidor para geração de imagem (pode ser diferente do chat)
   // Config geral
   systemPrompt: string;
   theme: 'dark' | 'light';
@@ -218,6 +235,15 @@ const SERVER_PRESETS: ServerPreset[] = [
     format: 'openai',
     hasFreeModels: true,
     description: 'Router HF — modelos open com free tier',
+  },
+  // --- Image Generation ---
+  {
+    name: 'Pollinations',
+    url: 'https://image.pollinations.ai/prompt',
+    icon: 'image',
+    format: 'pollinations',
+    hasFreeModels: true,
+    description: 'Geração de imagem FREE — sem API key, sem cadastro. Flux, GPT Image, etc',
   },
   // --- Local (sem API key) ---
   {
@@ -478,6 +504,130 @@ No `ServerEditorScreen`:
 
 ---
 
+## 5.5. Image Generation — Papel separado de Visão
+
+### Conceito
+
+- **Visão** (badge `isVision`): modelo CONSUME imagem no input (image_url no chat).
+  Já é suportado pelo chat atual — se o modelo ativo tem visão, você anexa foto.
+- **Image Generation** (badge `isImageGen`): modelo PRODUZ imagem no output.
+  É um endpoint/payload totalmente diferente de chat completions.
+
+### Endpoints de Image Generation
+
+Cada formato de servidor tem um endpoint diferente:
+
+```typescript
+// ServerService.ts — adicionar buildImageGenUrl()
+
+export function buildImageGenUrl(server: ServerEntry): string {
+  const clean = server.baseUrl.replace(/\/+$/, '');
+  switch (server.format) {
+    case 'openai':
+      // OpenAI: POST /v1/images/generations
+      // Body: { model: "gpt-image-2", prompt: "...", size: "1024x1024" }
+      // Response: { data: [{ b64_json: "..." }] } ou { data: [{ url: "..." }] }
+      return `${clean}/images/generations`;
+
+    case 'gemini':
+      // Gemini: POST /v1beta/models/<model>:generateContent
+      // com responseModalities: ["IMAGE"] no generationConfig
+      // Response: inlineData.base64 (PNG) no candidates[0].content.parts
+      return `${clean}/models`; // + /<model>:generateContent
+
+    case 'pollinations':
+      // Pollinations: GET https://image.pollinations.ai/prompt/<encoded_prompt>
+      //   ?width=1024&height=1024&model=flux&nologo=true
+      // Sem API key, sem POST — é só um GET que retorna a imagem PNG
+      // Response: imagem PNG no body (não JSON)
+      return clean; // a URL base já é o endpoint
+
+    default: // ollama, custom
+      return `${clean}/images/generations`; // assume OpenAI-compatível
+  }
+}
+```
+
+### Payload por formato
+
+```typescript
+export function buildImageGenPayload(
+  server: ServerEntry,
+  model: ModelEntry,
+  prompt: string,
+): Record<string, unknown> {
+  switch (server.format) {
+    case 'gemini':
+      return {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseModalities: ['TEXT', 'IMAGE'],
+        },
+      };
+
+    case 'pollinations':
+      // Pollinations não tem POST — é GET com query params
+      // buildImageGenUrl já é a URL base, só append query
+      return {}; // payload vazio — tudo na URL
+
+    default: // openai, ollama, custom
+      return {
+        model: model.modelId,
+        prompt,
+        n: 1,
+        size: '1024x1024',
+        response_format: 'b64_json',
+      };
+  }
+}
+```
+
+### Fluxo no Chat
+
+Quando o usuário quer gerar uma imagem:
+
+1. **Comando no chat:** usuário digita algo como `/imagine <prompt>` ou toca num botão de imagem
+2. App identifica que `activeImageGenModelId` está setado
+3. Resolve o `ModelEntry` → acha o `serverId` → acha o `ServerEntry`
+4. Busca a API key (via KeyRotation se multi-key)
+5. Chama `ImageGenService.generate(server, model, apiKey, prompt)`
+6. Recebe a imagem (base64 ou URL)
+7. Renderiza a imagem no chat como uma mensagem do assistant
+
+### Integration no ChatScreen
+
+```
+┌───────────────────────────┐
+│ 💬 [input bar normal]      │
+│ 📎 🖥️ 🖼️ [botão imagem]    │  ← botão de gerar imagem (só aparece se activeImageGenModelId setado)
+└───────────────────────────┘
+
+Ao tocar 🖼️:
+  ┌──────────────────────┐
+  │ Gerar imagem         │
+  │                      │
+  │ [Prompt da imagem..] │
+  │                      │
+  │ Modelo: gemini-flash │  ← activeImageGenModelId
+  │ Servidor: Google AI   │
+  │                      │
+  │ [    Gerar    ]      │
+  └──────────────────────┘
+```
+
+### Servers que suportam Image Generation (free)
+
+| Server | Format | Modelos | Free? |
+|---|---|---|---|
+| Google AI Studio | `gemini` | `gemini-3.1-flash-image`, `gemini-3-pro-image` | ✅ free tier |
+| OpenRouter | `openai` | `flux`, `sdxl`, `gpt-image-2` (via /images/generations) | alguns `:free` |
+| Pollinations | `pollinations` | `flux`, `turbo` (sem API key!) | ✅ gratuito |
+| OpenAI | `openai` | `gpt-image-2` | ❌ pago (excluído por enquanto) |
+
+**Pollinations** é especialmente interessante — não precisa de API key, é um GET simples que retorna PNG. Ideal para demo/onboarding de image gen sem cadastro.
+
+---
+
 ## 6. Migration Strategy
 
 Na primeira abertura após o update:
@@ -514,9 +664,11 @@ src/
     modelDb.ts             → CRUD de ModelEntry (MMKV)
     keychainDb.ts           → Multi-key CRUD no Keychain (substitui appSettings.ts atual)
   services/
-    ServerService.ts       → fetchModels(server), buildChatUrl(server), buildAuthHeaders(server)
+    ServerService.ts       → fetchModels(server), buildChatUrl(server), buildAuthHeaders(server),
+                              buildImageGenUrl(server), buildImageGenPayload(server, model, prompt)
     KeyRotation.ts         → Lógica de rotação/failover de API keys
     LlmService.ts          → refactor: recebe ServerEntry + ModelEntry + apiKey em vez de LlmConfig
+    ImageGenService.ts     → NOVO — generateImage(server, model, apiKey, prompt) → base64 | URL
     SttService.ts          → existe
     SttOnlineService.ts    → ajusta para ServerEntry/ModelEntry
     TtsService.ts          → ajusta para ServerEntry/ModelEntry

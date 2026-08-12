@@ -28,12 +28,13 @@
    ```
 
 2. Criar estes arquivos (esboços completos estão no design doc):
-   - `src/types/index.ts` — adicionar `ServerEntry`, `ModelEntry`, `AppSettingsV2`, `ServerFormat`, `KeyRotationStrategy`
+   - `src/types/index.ts` — adicionar `ServerEntry`, `ModelEntry`, `AppSettingsV2`, `ServerFormat`, `KeyRotationStrategy`, `ModelRole`
    - `src/data/serverDb.ts` — CRUD de ServerEntry (MMKV)
    - `src/data/modelDb.ts` — CRUD de ModelEntry (MMKV)
    - `src/data/keychainDb.ts` — multi-key no Keychain
-   - `src/services/ServerService.ts` — buildChatUrl, buildAuthHeaders, fetchModels, getReasoningFormat
+   - `src/services/ServerService.ts` — buildChatUrl, buildAuthHeaders, fetchModels, getReasoningFormat, buildImageGenUrl, buildImageGenPayload
    - `src/services/KeyRotation.ts` — single/round-robin/failover + cooldown
+   - `src/services/ImageGenService.ts` — generateImage(server, model, apiKey, prompt)
    - `src/data/appSettings.ts` — migration legado (AsyncStorage) → MMKV V2
 
 3. Marcar `migrated: false` antes da migration, `true` depois
