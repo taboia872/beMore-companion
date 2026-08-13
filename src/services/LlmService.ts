@@ -1,4 +1,5 @@
-import {LlmConfig, Message, ContentPart} from '../types';
+import {LlmConfig, Message, ContentPart, ServerEntry} from '../types';
+import {buildChatUrl as buildChatUrlV2, buildAuthHeaders} from './ServerService';
 
 /**
  * Eventos de stream emitidos para a UI conforme os tokens chegam.
@@ -384,8 +385,11 @@ function fetchBatch(
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
-    if (config.apiKey) {
-      xhr.setRequestHeader('Authorization', `Bearer ${config.apiKey}`);
+    const authHeaders = config.serverFormat
+      ? buildAuthHeaders({format: config.serverFormat} as ServerEntry, config.apiKey)
+      : config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {};
+    for (const [k, v] of Object.entries(authHeaders)) {
+      xhr.setRequestHeader(k, v);
     }
     xhr.onreadystatechange = () => {
       if (xhr.readyState === 4 && !finished) {
@@ -520,8 +524,11 @@ function streamNetwork(
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
-    if (config.apiKey) {
-      xhr.setRequestHeader('Authorization', `Bearer ${config.apiKey}`);
+    const authHeaders = config.serverFormat
+      ? buildAuthHeaders({format: config.serverFormat} as ServerEntry, config.apiKey)
+      : config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {};
+    for (const [k, v] of Object.entries(authHeaders)) {
+      xhr.setRequestHeader(k, v);
     }
 
     let consumed = 0; // offset já processado da responseText
@@ -679,4 +686,37 @@ export function abortGeneration(): void {
       /* no-op */
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// V2 API — ServerEntry-based
+// ---------------------------------------------------------------------------
+
+/**
+ * Versão V2 de streamResponse que aceita ServerEntry + modelId + apiKey
+ * em vez de LlmConfig. Converte internamente para LlmConfig e delega
+ * para streamResponse (reutilizando toda a lógica de stream/batch/thinking).
+ *
+ * O formato do servidor (openai, gemini, ollama, etc) é pasado via
+ * config.serverFormat — streamNetwork/fetchBatch usam buildAuthHeaders
+ * do ServerService quando serverFormat está presente, garantindo que
+ * Gemini use x-goog-api-key em vez de Bearer.
+ */
+export function streamResponseV2(
+  messages: Message[],
+  server: ServerEntry,
+  modelId: string,
+  apiKey: string,
+  onEvent: StreamCallback,
+  streamingEnabled = true,
+  thinkingEnabled = false,
+): Promise<void> {
+  const config: LlmConfig = {
+    provider: 'localhost',
+    baseUrl: server.baseUrl,
+    apiKey,
+    model: modelId,
+    serverFormat: server.format,
+  };
+  return streamResponse(messages, config, onEvent, streamingEnabled, thinkingEnabled);
 }

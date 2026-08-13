@@ -1,8 +1,10 @@
 import React, {useState, useEffect, useCallback} from 'react';
 import {StatusBar, View, BackHandler} from 'react-native';
-import {AppSettings, AppSettingsV2, Message} from './types';
-import {loadSettings, loadSettingsV2, migrateToV2} from './data/appSettings';
-import {getAllServers} from './data/serverDb';
+import {AppSettings, AppSettingsV2, Message, ServerEntry, ModelEntry} from './types';
+import {loadSettingsV2, migrateToV2} from './data/appSettings';
+import {getAllServers, getServer} from './data/serverDb';
+import {getModel} from './data/modelDb';
+import {loadApiKey} from './data/keychainDb';
 import {ChatScreen} from './screens/ChatScreen';
 import {SettingsScreen} from './screens/SettingsScreen';
 import {OnboardingScreen} from './screens/OnboardingScreen';
@@ -19,6 +21,10 @@ export default function App() {
   const [settingsV2, setSettingsV2] = useState<AppSettingsV2 | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  // servidor/modelo ativo resolvidos do V2 (para construir AppSettings legado)
+  const [activeServer, setActiveServer] = useState<ServerEntry | null>(null);
+  const [activeModel, setActiveModel] = useState<ModelEntry | null>(null);
+  const [apiKey, setApiKey] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -26,21 +32,78 @@ export default function App() {
       const v2 = await migrateToV2();
       setSettingsV2(v2);
 
-      // Carrega settings legado (ainda usado por ChatScreen/SettingsScreen)
-      const legacy = await loadSettings();
-      setSettings(legacy);
-
       // Verifica se precisa onboarding: não migrou OU não tem servidores
       const servers = getAllServers();
       if (!v2.migrated || servers.length === 0) {
         setNeedsOnboarding(true);
+        return;
       }
+
+      // resolve servidor e modelo ativos do V2
+      const {server, model, apiKey: key} = await resolveActiveFromV2(v2);
+
+      // Carrega settings legado (ainda usado por ChatScreen/SettingsScreen)
+      // construído a partir do V2 (ponte de compatibilidade)
+      const legacy = buildLegacyFromV2(v2, server, model, key);
+      setSettings(legacy);
     })();
   }, []);
 
+  /**
+   * Resolve servidor e modelo ativos do V2, carrega API key do Keychain.
+   * Retorna a apiKey para uso imediato (sem esperar re-render).
+   */
+  const resolveActiveFromV2 = async (
+    v2: AppSettingsV2,
+  ): Promise<{server: ServerEntry | null; model: ModelEntry | null; apiKey: string}> => {
+    const server = v2.activeServerId ? getServer(v2.activeServerId) : null;
+    const model = v2.activeModelId ? getModel(v2.activeModelId) : null;
+    setActiveServer(server);
+    setActiveModel(model);
+
+    let key = '';
+    if (server && server.apiKeyCount > 0) {
+      key = await loadApiKey(server.id, server.activeKeyIndex);
+    }
+    setApiKey(key);
+    return {server, model, apiKey: key};
+  };
+
+  /**
+   * Constrói AppSettings legado a partir de AppSettingsV2 + ServerEntry + ModelEntry.
+   * Esta é a ponte de compatibilidade — permite que ChatScreen/SettingsScreen
+   * funcionem sem refatoração, lendo do novo sistema V2.
+   */
+  const buildLegacyFromV2 = (
+    v2: AppSettingsV2,
+    server: ServerEntry | null,
+    model: ModelEntry | null,
+    key?: string,
+  ): AppSettings => {
+    return {
+      systemPrompt: v2.systemPrompt,
+      theme: v2.theme,
+      sttMode: v2.sttMode,
+      sttModelPath: v2.sttModelPath,
+      sttOnlineModel: '',  // virá do activeSttModelId quando implementado
+      sttServerOverride: '',  // virá do sttServerId
+      ttsOnlineModel: '',  // virá do activeTtsModelId
+      ttsServerOverride: '',  // virá do ttsServerId
+      ttsVoice: v2.ttsVoice,
+      ttsAutoPlay: v2.ttsAutoPlay,
+      streamingEnabled: v2.streamingEnabled,
+      llm: {
+        provider: 'localhost',
+        baseUrl: server?.baseUrl ?? '',
+        apiKey: key ?? apiKey,
+        model: model?.modelId ?? '',
+        serverFormat: server?.format,
+      },
+    };
+  };
+
   // Intercepta o botão "Voltar" físico do Android: se settings aberto, fecha
-  // o overlay; caso contrario deixa o sistema fazer (nada / sair). Sem isso,
-  // o Android finaliza a activity porque não há back-stack interno na app.
+  // o overlay; caso contrario deixa o sistema fazer (nada / sair).
   useEffect(() => {
     const handler = () => {
       if (settingsOpen) {
@@ -66,10 +129,13 @@ export default function App() {
       <OnboardingScreen
         onConclude={() => {
           setNeedsOnboarding(false);
-          // Recarrega settings após onboarding
+          // Recarrega settings V2 + resolve ativos
           const v2 = loadSettingsV2();
           setSettingsV2(v2);
-          loadSettings().then(setSettings);
+          resolveActiveFromV2(v2).then(({server, model, apiKey: key}) => {
+            const legacy = buildLegacyFromV2(v2, server, model, key);
+            setSettings(legacy);
+          });
         }}
       />
     );
@@ -101,7 +167,17 @@ export default function App() {
         <SettingsScreen
           settings={settings}
           onChange={setSettings}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false);
+            // Após fechar settings, recarrega V2 e reconstrói legacy
+            // (o settings pode ter alterado V2 indiretamente)
+            const v2 = loadSettingsV2();
+            setSettingsV2(v2);
+            resolveActiveFromV2(v2).then(({server, model, apiKey: key}) => {
+              const legacy = buildLegacyFromV2(v2, server, model, key);
+              setSettings(legacy);
+            });
+          }}
         />
       )}
     </View>

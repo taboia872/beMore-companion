@@ -10,6 +10,7 @@ export interface LlmConfig {
   apiKey: string;        // opcional para localhost
   model: string;         // nome do modelo (ex: qwen2.5, llama3)
   localModelPath?: string; // path no device para modelo GGUF (modo local)
+  serverFormat?: ServerFormat; // formato V2 (openai, gemini, etc)
 }
 
 // ---------------------------------------------------------------------------

@@ -14,8 +14,8 @@ import {
   FlatList,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
-import {AppSettings, LlmProvider} from '../types';
-import {saveSettings, loadApiKeyForServer, saveApiKeyForServer} from '../data/appSettings';
+import {AppSettings, LlmProvider, ServerFormat} from '../types';
+import {saveSettings, loadApiKeyForServer, saveApiKeyForServer, loadSettingsV2, patchSettingsV2} from '../data/appSettings';
 import {shortModelName} from '../utils/modelName';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 import {getTheme, ThemeColors} from '../utils/theme';
@@ -189,8 +189,8 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
   /**
    * Helper central p/ aplicar mudanças imediatamente. Atualiza o draft
    * local, propaga onChange (síncrono) e persiste em background via
-   * saveSettings (sem await — não bloqueia a UI). Substitui o antigo
-   * fluxo draft → save() com botão Salvar.
+   * saveSettings (legado) + patchSettingsV2 (novo MMKV). Substitui o
+   * antigo fluxo draft → save() com botão Salvar.
    */
   const update = (patch: Partial<AppSettings>) => {
     setDraft(prev => {
@@ -200,12 +200,23 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         llm: patch.llm ? {...prev.llm, ...patch.llm} : prev.llm,
       };
       onChange(next);
-      saveSettings(next); // persistência em background (não precisa await)
+      saveSettings(next); // persistência legado (AsyncStorage)
+      // Sincroniza com V2 (MMKV) — apenas campos gerais
+      const v2Patch: Record<string, unknown> = {};
+      if (patch.systemPrompt !== undefined) v2Patch.systemPrompt = patch.systemPrompt;
+      if (patch.theme !== undefined) v2Patch.theme = patch.theme;
+      if (patch.sttMode !== undefined) v2Patch.sttMode = patch.sttMode;
+      if (patch.sttModelPath !== undefined) v2Patch.sttModelPath = patch.sttModelPath;
+      if (patch.ttsVoice !== undefined) v2Patch.ttsVoice = patch.ttsVoice;
+      if (patch.ttsAutoPlay !== undefined) v2Patch.ttsAutoPlay = patch.ttsAutoPlay;
+      if (patch.streamingEnabled !== undefined) v2Patch.streamingEnabled = patch.streamingEnabled;
+      if (Object.keys(v2Patch).length > 0) patchSettingsV2(v2Patch);
       return next;
     });
   };
 
-  /** Atalho p/ atualizar apenas campos de llm — mantém ergonomia do `updateLlm`. */
+  /** Atalho p/ atualizar apenas campos de llm — mantém ergonomia do `updateLlm`.
+   *  Também persiste a API key no Keychain (formato V2 serverId-based). */
   const updateLlm = (patch: Partial<AppSettings['llm']>) =>
     setDraft(prev => {
       const next: AppSettings = {
@@ -214,6 +225,11 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
       };
       onChange(next);
       saveSettings(next);
+      // Persiste API key no Keychain se mudou
+      if (patch.apiKey !== undefined && next.llm.baseUrl) {
+        // Salva no formato legado (hostname-based) para compat
+        saveApiKeyForServer(next.llm.baseUrl, patch.apiKey);
+      }
       return next;
     });
 
