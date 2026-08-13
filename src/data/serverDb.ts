@@ -10,6 +10,7 @@
 import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {ServerEntry} from '../types';
+import {uuidv4} from '../utils/uuid';
 
 const storage = new MMKV();
 const SERVERS_KEY = '@bemore_servers';
@@ -113,7 +114,7 @@ export function createServer(
 ): ServerEntry {
   const now = Date.now();
   const server: ServerEntry = {
-    id: crypto.randomUUID(),
+    id: uuidv4(),
     name: partial.name,
     baseUrl: partial.baseUrl,
     format: partial.format,

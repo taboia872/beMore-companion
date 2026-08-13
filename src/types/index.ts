@@ -51,7 +51,7 @@ export type KeyRotationStrategy = 'single' | 'round-robin' | 'failover';
  * A API key NÃO vive aqui — fica no Keychain, keyed por serverId+keyIndex.
  */
 export interface ServerEntry {
-  id: string;                      // UUID (crypto.randomUUID())
+  id: string;                      // UUID v4 (utils/uuid.ts uuidv4())
   name: string;                    // Nome amigável ex: "Minha Ollama", "OpenRouter"
   baseUrl: string;                 // URL base ex: "https://api.groq.com/openai/v1"
   format: ServerFormat;            // Determina método de auth e paths

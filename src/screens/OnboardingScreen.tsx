@@ -11,7 +11,7 @@
  * Conforme design doc seção 4.1.
  */
 
-import React, {useState, useCallback} from 'react';
+import React, {useState, useCallback, useEffect} from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,7 @@ import {
   ActivityIndicator,
   FlatList,
   Alert,
+  BackHandler,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {ThemeColors, getTheme} from '../utils/theme';
@@ -49,6 +50,20 @@ export function OnboardingScreen({onConclude}: Props) {
   const theme = getTheme('dark'); // onboarding sempre dark (ainda não tem settings)
   const [step, setStep] = useState<Step>('welcome');
   const [isOnline, setIsOnline] = useState(true);
+
+  // Botão "Voltar" físico do Android: volta um stepinternamente,
+  // só fecha no step 'welcome' (deixando o SO agir).
+  useEffect(() => {
+    const handler = () => {
+      if (step === 'welcome') return false; // deixa o SO agir
+      if (step === 'preset') setStep('welcome');
+      else if (step === 'apikey') setStep('preset');
+      else if (step === 'models') setStep('apikey');
+      return true; // consome o back
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', handler);
+    return () => sub.remove();
+  }, [step]);
 
   // Preset selecionado (ou null = custom)
   const [selectedPreset, setSelectedPreset] = useState<ServerPreset | null>(null);

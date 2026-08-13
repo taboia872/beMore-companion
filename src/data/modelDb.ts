@@ -8,6 +8,7 @@
 import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {ModelEntry} from '../types';
+import {uuidv4} from '../utils/uuid';
 import {
   isVisionModel,
   isSttModel,
@@ -166,7 +167,7 @@ export function syncModelsFromFetch(
   for (const modelId of fetchedIds) {
     if (!existingMap.has(modelId)) {
       const entry: ModelEntry = {
-        id: crypto.randomUUID(),
+        id: uuidv4(),
         serverId,
         modelId,
         isVision: isVisionModel(modelId),

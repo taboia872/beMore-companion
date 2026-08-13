@@ -23,6 +23,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import {MMKV} from 'react-native-mmkv';
 import 'react-native-get-random-values';
 import {AppSettings, AppSettingsV2, ServerEntry, ServerFormat} from '../types';
+import {uuidv4} from '../utils/uuid';
 import {getServer, saveServer, createServer} from './serverDb';
 import {saveModel, syncModelsFromFetch} from './modelDb';
 import {
@@ -349,7 +350,7 @@ export async function migrateToV2(): Promise<AppSettingsV2> {
         const {isVisionModel, isSttModel, isTtsModel, isAnyToAnyModel} =
           require('../utils/modelCapabilities');
         const modelEntry = {
-          id: crypto.randomUUID(),
+          id: uuidv4(),
           serverId: server.id,
           modelId: legacy.llm.model,
           isVision: isVisionModel(legacy.llm.model),
