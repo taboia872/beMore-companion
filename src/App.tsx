@@ -1,7 +1,7 @@
 import React, {useState, useEffect, useCallback} from 'react';
 import {StatusBar, View, BackHandler} from 'react-native';
 import {AppSettings, AppSettingsV2, Message, ServerEntry, ModelEntry} from './types';
-import {loadSettingsV2, migrateToV2} from './data/appSettings';
+import {loadSettingsV2, migrateToV2, patchSettingsV2} from './data/appSettings';
 import {getAllServers, getServer} from './data/serverDb';
 import {getModel} from './data/modelDb';
 import {loadApiKey} from './data/keychainDb';
@@ -165,12 +165,31 @@ export default function App() {
           Quando fechado, renderiza null (não ocupa memória visual). */}
       {settingsOpen && (
         <SettingsScreen
-          settings={settings}
-          onChange={setSettings}
+          settingsV2={settingsV2!}
+          onChangeV2={(patch: Partial<AppSettingsV2>) => {
+            // Aplica patch ao V2 (MMKV) e atualiza estado
+            const updated = patchSettingsV2(patch);
+            setSettingsV2(updated);
+            // Se mudou servidor ou modelo ativo, recarrega apiKey e reconstrói legacy
+            if (patch.activeServerId !== undefined || patch.activeModelId !== undefined) {
+              const s = updated.activeServerId ? getServer(updated.activeServerId) : null;
+              const m = updated.activeModelId ? getModel(updated.activeModelId) : null;
+              loadApiKey(s?.id ?? '', s?.activeKeyIndex ?? 0).then(k => {
+                setApiKey(k);
+                const legacy = buildLegacyFromV2(updated, s, m, k);
+                setSettings(legacy);
+              });
+            } else {
+              // Só mudou settings gerais (theme, prompt, etc) — reconstrói legacy
+              const s = updated.activeServerId ? getServer(updated.activeServerId) : null;
+              const m = updated.activeModelId ? getModel(updated.activeModelId) : null;
+              const legacy = buildLegacyFromV2(updated, s, m);
+              setSettings(legacy);
+            }
+          }}
           onClose={() => {
             setSettingsOpen(false);
             // Após fechar settings, recarrega V2 e reconstrói legacy
-            // (o settings pode ter alterado V2 indiretamente)
             const v2 = loadSettingsV2();
             setSettingsV2(v2);
             resolveActiveFromV2(v2).then(({server, model, apiKey: key}) => {

@@ -14,9 +14,19 @@ import {
   FlatList,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
-import {AppSettings, LlmProvider, ServerFormat} from '../types';
-import {saveSettings, loadApiKeyForServer, saveApiKeyForServer, loadSettingsV2, patchSettingsV2} from '../data/appSettings';
-import {shortModelName} from '../utils/modelName';
+import {AppSettingsV2, ServerEntry, ModelEntry, ServerFormat} from '../types';
+import {
+  getAllServers,
+  getServer,
+  deleteServerCascade,
+} from '../data/serverDb';
+import {
+  getModelsByServer,
+  getAllModels,
+  getModel,
+} from '../data/modelDb';
+import {loadSettingsV2, patchSettingsV2} from '../data/appSettings';
+import {shortModelName, displayModelName} from '../utils/modelName';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 import {getTheme, ThemeColors} from '../utils/theme';
 
@@ -31,41 +41,10 @@ function streamingCheckboxIcon(on: boolean) {
 }
 
 interface Props {
-  settings: AppSettings;
-  onChange: (s: AppSettings) => void;
+  settingsV2: AppSettingsV2;
+  onChangeV2: (patch: Partial<AppSettingsV2>) => void;
   onClose: () => void;
 }
-
-interface RemoteModel {
-  id?: string;
-  name?: string; // Google AI Studio usa "name" em vez de "id" (formato "models/gemini-2.0-flash")
-}
-
-/**
- * Presets de servidores online compatíveis com OpenAI API.
- * O usuário seleciona um da lista e a URL é preenchida automaticamente.
- * A última opção "Personalizado" abre um campo de texto livre.
- */
-interface ServerPreset {
-  name: string;
-  url: string;
-  /** Nome do ícone MaterialIconsIconName p/ o botão do dropdown. */
-  icon: string;
-  /** Se true, o servidor oferece modelos gratuitos (filtro relevante no modal). */
-  hasFreeModels?: boolean;
-}
-
-const SERVER_PRESETS: ServerPreset[] = [
-  {name: 'Google AI Studio', url: 'https://generativelanguage.googleapis.com/v1beta', icon: 'auto-awesome', hasFreeModels: true},
-  {name: 'OpenRouter', url: 'https://openrouter.ai/api/v1', icon: 'route', hasFreeModels: true},
-  {name: 'Ollama Cloud', url: 'https://ollama.com/v1', icon: 'cloud-queue', hasFreeModels: true},
-  {name: 'Groq', url: 'https://api.groq.com/openai/v1', icon: 'bolt', hasFreeModels: true},
-  {name: 'NVIDIA', url: 'https://integrate.api.nvidia.com/v1', icon: 'memory', hasFreeModels: true},
-  {name: 'AIHorde', url: 'https://oai.aihorde.net/v1', icon: 'groups', hasFreeModels: true},
-];
-
-// Valor especial que identifica a opção "Personalizado" no dropdown.
-const CUSTOM_SERVER = '__custom__';
 
 interface CardProps {
   title: string;
@@ -104,277 +83,225 @@ function Card({title, icon, children, defaultExpanded = false, theme}: CardProps
   );
 }
 
-export function SettingsScreen({settings, onChange, onClose}: Props) {
-  const [draft, setDraft] = useState<AppSettings>(settings);
+// --- Helpers para formatar badges (reutilizam getModelBadges por modelId) ---
 
-  // Tema dinâmico (claro/escuro) — aplica a todas as cores desta tela.
-  const theme = getTheme(settings.theme);
+function renderBadges(
+  modelId: string,
+  styles: ReturnType<typeof getStyles>,
+): React.ReactNode {
+  const badges = getModelBadges(modelId);
+  return badges.map((badge, idx) => {
+    const key = `${badge.type}-${idx}`;
+    if (badge.type === 'vision') {
+      return (
+        <View key={key} style={styles.visionBadge}>
+          <Icon name="visibility" size={10} color="#a371f7" />
+          <Text style={styles.visionBadgeText}>VISÃO</Text>
+        </View>
+      );
+    }
+    if (badge.type === 'stt') {
+      return (
+        <View key={key} style={styles.sttBadge}>
+          <Icon name="mic" size={10} color="#f0883e" />
+          <Text style={styles.sttBadgeText}>STT</Text>
+        </View>
+      );
+    }
+    if (badge.type === 'tts') {
+      return (
+        <View key={key} style={styles.ttsBadge}>
+          <Icon name="volume-up" size={10} color="#2dd4bf" />
+          <Text style={styles.ttsBadgeText}>TTS</Text>
+        </View>
+      );
+    }
+    // anyToAny
+    return (
+      <View key={key} style={styles.anyBadge}>
+        <Icon name="all-inclusive" size={10} color="#d2a8ff" />
+        <Text style={styles.anyBadgeText}>ANY→ANY</Text>
+      </View>
+    );
+  });
+}
+
+/** Gera badges visíveis para imageGen + as capabilities do getModelBadges. */
+function renderAllBadges(
+  model: ModelEntry,
+  styles: ReturnType<typeof getStyles>,
+): React.ReactNode {
+  const capBadges = renderBadges(model.modelId, styles);
+  const imageBadge =
+    model.isImageGen || model.modelId.toLowerCase().includes('image') ? (
+      <View key="imagegen" style={styles.sttBadge}>
+        <Icon name="image" size={10} color="#3fb950" />
+        <Text style={styles.sttBadgeText}>IMG</Text>
+      </View>
+    ) : null;
+  return (
+    <>
+      {capBadges}
+      {imageBadge}
+    </>
+  );
+}
+
+export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
+  const theme = getTheme(settingsV2.theme);
   const s = getStyles(theme);
 
-  const [fetchingModels, setFetchingModels] = useState(false);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  // Quando true, o modal de modelos está selecionando modelo STT (não LLM).
-  const [sttPickerMode, setSttPickerMode] = useState(false);
-  const [ttsPickerMode, setTtsPickerMode] = useState(false);
-  const [showModelsModal, setShowModelsModal] = useState(false);
-  // Filtro de modelos no modal: 'all' | 'free' | 'stt' | 'tts'
-  const [modelFilter, setModelFilter] = useState<'all' | 'free' | 'stt' | 'tts'>('all');
-
-  // Dropdown de servidor: qual preset está selecionado, ou CUSTOM_SERVER.
-  // Derivado da URL atual — se a URL match um preset, seleciona ele; senão, custom.
+  // Drop downs abertos
   const [serverDropdownOpen, setServerDropdownOpen] = useState(false);
+  const [sttServerDropdownOpen, setSttServerDropdownOpen] = useState(false);
+  const [ttsServerDropdownOpen, setTtsServerDropdownOpen] = useState(false);
 
-  // Detecta qual preset corresponde à URL atual (match de hostname).
-  // Se a URL é vazia E o usuário ainda não escolheu nada, assume o primeiro
-  // preset como default. Mas se o usuário limpou a URL ao selecionar
-  // "Personalizado", retorna CUSTOM_SERVER (URL vazia = custom em branco).
-  const detectPreset = (url: string): string => {
-    if (!url?.trim()) {
-      // URL vazia: se o draft já tem provider=localhost com URL vazia,
-      // assumimos que é "Personalizado" (usuário limpou deliberadamente).
-      return CUSTOM_SERVER;
-    }
-    const lower = url.toLowerCase().replace(/\/+$/, '');
-    for (const p of SERVER_PRESETS) {
-      // Compara por hostname (ex: api.groq.com) para tolerar paths diferentes
-      const presetHost = p.url.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
-      const urlHost = lower.replace(/^https?:\/\//, '').split('/')[0];
-      if (urlHost === presetHost) return p.url;
-    }
-    return CUSTOM_SERVER;
-  };
+  // Estado de loading p/ delete de servidor
+  const [deleting, setDeleting] = useState(false);
 
-  const selectedPreset = detectPreset(draft.llm.baseUrl);
+  // --- Dados (síncronos, MMKV) ---
 
-  const selectPreset = async (presetUrl: string) => {
+  const allServers: ServerEntry[] = getAllServers();
+
+  const activeServerId = settingsV2.activeServerId;
+  const activeServer = activeServerId ? getServer(activeServerId) : null;
+
+  // Modelos do servidor ativo (chat/LLM) — apenas visíveis (não-hidden)
+  const serverModels: ModelEntry[] = activeServerId
+    ? getModelsByServer(activeServerId).filter(m => !m.isHidden)
+    : [];
+
+  // Modelos STT de todos os servidores (isStt === true)
+  const allModels: ModelEntry[] = getAllModels();
+  const sttModels: ModelEntry[] = allModels.filter(
+    m => m.isStt === true && !m.isHidden,
+  );
+  const ttsModels: ModelEntry[] = allModels.filter(
+    m => m.isTts === true && !m.isHidden,
+  );
+
+  // --- Helpers de ordenação (favoritos primeiro) ---
+
+  function sortFavFirst<T extends {isFavorite?: boolean}>(
+    arr: T[],
+  ): T[] {
+    return [...arr].sort((a, b) => {
+      const af = a.isFavorite ? 0 : 1;
+      const bf = b.isFavorite ? 0 : 1;
+      if (af !== bf) return af - bf;
+      return 0;
+    });
+  }
+
+  const sortedServerModels = sortFavFirst(serverModels);
+  const sortedSttModels = sortFavFirst(sttModels);
+  const sortedTtsModels = sortFavFirst(ttsModels);
+
+  // --- Handlers ---
+
+  const selectServer = (server: ServerEntry) => {
     setServerDropdownOpen(false);
-
-    if (presetUrl === CUSTOM_SERVER) {
-      // Se mudando para personalizado, limpa a URL p/ o usuário digitar.
-      // Mas se já era custom e apenas re-selecionando, mantém.
-      if (selectedPreset !== CUSTOM_SERVER) {
-        // Antes de trocar, salva a chave atual associada ao servidor atual.
-        if (draft.llm.apiKey && draft.llm.baseUrl) {
-          await saveApiKeyForServer(draft.llm.baseUrl, draft.llm.apiKey);
-        }
-        updateLlm({baseUrl: '', apiKey: ''});
-      }
-      return;
-    }
-
-    // Antes de trocar, salva a chave atual associada ao servidor atual.
-    if (draft.llm.apiKey && draft.llm.baseUrl && draft.llm.baseUrl !== presetUrl) {
-      await saveApiKeyForServer(draft.llm.baseUrl, draft.llm.apiKey);
-    }
-
-    // Troca para o novo servidor e carrega a chave salva (se existir).
-    const savedKey = await loadApiKeyForServer(presetUrl);
-    updateLlm({baseUrl: presetUrl, apiKey: savedKey});
+    onChangeV2({activeServerId: server.id, activeModelId: null});
   };
 
-  // Nome amigável do servidor selecionado p/ exibir no botão do dropdown.
-  const selectedServerName = (): string => {
-    if (selectedPreset === CUSTOM_SERVER) return 'Personalizado';
-    const preset = SERVER_PRESETS.find(p => p.url === selectedPreset);
-    return preset?.name ?? 'Personalizado';
+  const selectModel = (model: ModelEntry) => {
+    onChangeV2({activeModelId: model.id});
   };
 
-  // Ícone do servidor selecionado p/ exibir no botão do dropdown.
-  const selectedServerIcon = (): string => {
-    if (selectedPreset === CUSTOM_SERVER) return 'edit';
-    const preset = SERVER_PRESETS.find(p => p.url === selectedPreset);
-    return preset?.icon ?? 'dns';
+  const selectSttModel = (model: ModelEntry) => {
+    onChangeV2({activeSttModelId: model.id});
   };
 
-  /**
-   * Helper central p/ aplicar mudanças imediatamente. Atualiza o draft
-   * local, propaga onChange (síncrono) e persiste em background via
-   * saveSettings (legado) + patchSettingsV2 (novo MMKV). Substitui o
-   * antigo fluxo draft → save() com botão Salvar.
-   */
-  const update = (patch: Partial<AppSettings>) => {
-    setDraft(prev => {
-      const next: AppSettings = {
-        ...prev,
-        ...patch,
-        llm: patch.llm ? {...prev.llm, ...patch.llm} : prev.llm,
-      };
-      onChange(next);
-      saveSettings(next); // persistência legado (AsyncStorage)
-      // Sincroniza com V2 (MMKV) — apenas campos gerais
-      const v2Patch: Record<string, unknown> = {};
-      if (patch.systemPrompt !== undefined) v2Patch.systemPrompt = patch.systemPrompt;
-      if (patch.theme !== undefined) v2Patch.theme = patch.theme;
-      if (patch.sttMode !== undefined) v2Patch.sttMode = patch.sttMode;
-      if (patch.sttModelPath !== undefined) v2Patch.sttModelPath = patch.sttModelPath;
-      if (patch.ttsVoice !== undefined) v2Patch.ttsVoice = patch.ttsVoice;
-      if (patch.ttsAutoPlay !== undefined) v2Patch.ttsAutoPlay = patch.ttsAutoPlay;
-      if (patch.streamingEnabled !== undefined) v2Patch.streamingEnabled = patch.streamingEnabled;
-      if (Object.keys(v2Patch).length > 0) patchSettingsV2(v2Patch);
-      return next;
-    });
+  const selectTtsModel = (model: ModelEntry) => {
+    onChangeV2({activeTtsModelId: model.id});
   };
 
-  /** Atalho p/ atualizar apenas campos de llm — mantém ergonomia do `updateLlm`.
-   *  Também persiste a API key no Keychain (formato V2 serverId-based). */
-  const updateLlm = (patch: Partial<AppSettings['llm']>) =>
-    setDraft(prev => {
-      const next: AppSettings = {
-        ...prev,
-        llm: {...prev.llm, ...patch},
-      };
-      onChange(next);
-      saveSettings(next);
-      // Persiste API key no Keychain se mudou
-      if (patch.apiKey !== undefined && next.llm.baseUrl) {
-        // Salva no formato legado (hostname-based) para compat
-        saveApiKeyForServer(next.llm.baseUrl, patch.apiKey);
-      }
-      return next;
-    });
+  const selectSttServer = (serverId: string | null) => {
+    setSttServerDropdownOpen(false);
+    onChangeV2({sttServerId: serverId});
+  };
 
-  const fetchModels = async () => {
-    if (!draft.llm.baseUrl?.trim()) {
-      Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
-      return;
-    }
-    setFetchingModels(true);
-    setModelFilter('all'); // reset filtro ao buscar novos modelos
-    setSttPickerMode(false); // busca de modelos LLM, não STT
-    setTtsPickerMode(false); // nem TTS
-    try {
-      const baseUrl = draft.llm.baseUrl.replace(/\/+$/, '');
+  const selectTtsServer = (serverId: string | null) => {
+    setTtsServerDropdownOpen(false);
+    onChangeV2({ttsServerId: serverId});
+  };
 
-      // Cada servidor pode ter um endpoint diferente para listar modelos.
-      // Google AI Studio: API nativa v1beta/models com ?key=API_KEY (não Bearer)
-      // OpenRouter: endpoint público com pricing info.
-      // Demais: /models padrão OpenAI-compatível (Bearer auth).
-      let url: string;
-      let useQueryParamKey = false;
-      if (baseUrl.includes('openrouter.ai')) {
-        url = 'https://openrouter.ai/api/v1/models';
-      } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-        url = `${baseUrl}/models`;
-        useQueryParamKey = true; // Gemini nativo usa ?key= em vez de Bearer
-      } else {
-        url = `${baseUrl}/models`;
-      }
+  const handleDeleteServer = (server: ServerEntry) => {
+    Alert.alert(
+      'Deletar servidor',
+      `Deletar "${server.name}"? Todos os modelos e API keys associados serão removidos.`,
+      [
+        {text: 'Cancelar', style: 'cancel'},
+        {
+          text: 'Deletar',
+          style: 'destructive',
+          onPress: async () => {
+            setDeleting(true);
+            try {
+              const ok = await deleteServerCascade(server.id);
+              if (ok) {
+                const wasActive = settingsV2.activeServerId === server.id;
+                if (wasActive) {
+                  onChangeV2({activeServerId: null, activeModelId: null});
+                }
+                // Notifica: precisa de refresh. Usamos onChangeV2 com o estado atual.
+                onChangeV2({});
+              } else {
+                Alert.alert('Erro', 'Servidor não encontrado.');
+              }
+            } catch (e) {
+              Alert.alert(
+                'Erro ao deletar',
+                (e as Error).message ?? String(e),
+              );
+            } finally {
+              setDeleting(false);
+            }
+          },
+        },
+      ],
+    );
+  };
 
-      const headers: Record<string, string> = {};
-      if (draft.llm.apiKey && !useQueryParamKey) {
-        headers['Authorization'] = `Bearer ${draft.llm.apiKey}`;
-      }
-      if (useQueryParamKey && draft.llm.apiKey) {
-        url = `${url}?key=${encodeURIComponent(draft.llm.apiKey)}`;
-      }
-      const response = await fetch(url, {
-        method: 'GET',
-        headers,
-      });
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
-      }
-      const data = await response.json();
-      const models: RemoteModel[] = data?.data ?? data?.models ?? [];
-      const ids = models
-        .map(m => {
-          // Google AI Studio usa campo "name" (formato "models/gemini-2.0-flash")
-          // em vez de "id". Removemos o prefixo "models/" para ficar limpo.
-          const raw = m.id ?? m.name ?? '';
-          if (typeof raw !== 'string') return '';
-          return raw.replace(/^models\//, '');
-        })
-        .filter((id): id is string => id.length > 0);
-      if (ids.length === 0) {
-        Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
-        return;
-      }
-      // Ordena alfabeticamente (case-insensitive).
-      ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
-      setAvailableModels(ids);
-      setShowModelsModal(true);
-    } catch (e) {
-      Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
-    } finally {
-      setFetchingModels(false);
+  const formatBadgeColor = (format: ServerFormat): string => {
+    switch (format) {
+      case 'openai':
+        return '#10a37f';
+      case 'gemini':
+        return '#4285f4';
+      case 'ollama':
+        return '#6d4aff';
+      case 'pollinations':
+        return '#e84393';
+      default:
+        return '#8b949e';
     }
   };
 
-  const pickModel = (id: string) => {
-    if (ttsPickerMode) {
-      update({ttsOnlineModel: id});
-    } else if (sttPickerMode) {
-      update({sttOnlineModel: id});
-    } else {
-      updateLlm({model: id});
-    }
-    setShowModelsModal(false);
-    setSttPickerMode(false);
-    setTtsPickerMode(false);
+  // --- Nome legível do modelo ---
+
+  const modelDisplayName = (model: ModelEntry): string => {
+    if (model.displayName?.trim()) return model.displayName!;
+    return shortModelName(model.modelId);
   };
 
-  /**
-   * Detecta se um modelo é gratuito. A detecção varia por servidor:
-   * - OpenRouter: modelos gratuitos têm `:free` no id
-   * - Google AI Studio: todos os gemini-* são free tier
-   * - Groq: TODOS os modelos são gratuitos
-   * - AIHorde: TODOS os modelos são gratuitos (crowdsourced)
-   * - HuggingFace: assume pago (precisa de API key, modelos paid)
-   * - NVIDIA: presume free tier (NVIDIA oferece free credits)
-   * - Ollama Cloud: modelos free tier incluem gemma3:1b, gemma4:31b,
-   *   gpt-oss:20b, gpt-oss:120b, nemotron-3-super:cloud, qwen3-vl:235b-cloud,
-   *   qwen3-coder:480b-cloud (lista pode expandir — verificar ollama.com/search?c=cloud)
-   * - Outros/llama.cpp: assume pago (modelos locais não têm noção de free)
-   */
-  const isFreeModel = (id: string): boolean => {
-    const lower = id.toLowerCase();
-    // OpenRouter: convenção :free no id
-    if (lower.endsWith(':free')) return true;
-    // Google AI Studio: todos os gemini-* são free tier
-    if (lower.startsWith('gemini-') || lower.startsWith('models/gemini-')) return true;
-    // Detecta pelo servidor selecionado
-    const hostname = detectPreset(draft.llm.baseUrl);
-    if (hostname === SERVER_PRESETS.find(p => p.name === 'Groq')?.url) return true;
-    if (hostname === SERVER_PRESETS.find(p => p.name === 'AIHorde')?.url) return true;
-    // Ollama Cloud: apenas modelos free tier
-    if (hostname === SERVER_PRESETS.find(p => p.name === 'Ollama Cloud')?.url) {
-      return [
-        'gemma3:1b',
-        'gemma4:31b',
-        'gpt-oss:20b',
-        'gpt-oss:120b',
-        'nemotron-3-super:cloud',
-        'qwen3-vl:235b-cloud',
-        'qwen3-coder:480b-cloud',
-      ].includes(lower);
-    }
-    return false;
-  };
+  const activeModel = settingsV2.activeModelId
+    ? getModel(settingsV2.activeModelId)
+    : null;
+  const activeSttModel = settingsV2.activeSttModelId
+    ? getModel(settingsV2.activeSttModelId)
+    : null;
+  const activeTtsModel = settingsV2.activeTtsModelId
+    ? getModel(settingsV2.activeTtsModelId)
+    : null;
 
-  // Modelos filtrados conforme seleção do filtro no modal
-  const hasCapability = (id: string, cap: ModelCapability): boolean => {
-    return getModelBadges(id).some(b => b.type === cap);
-  };
-
-  const filteredModels = availableModels.filter(id => {
-    if (modelFilter === 'all') {
-      // No modo STT picker, "Todos" mostra só modelos STT (pré-filtro)
-      if (sttPickerMode) return hasCapability(id, 'stt');
-      // No modo TTS picker, "Todos" mostra só modelos TTS (pré-filtro)
-      if (ttsPickerMode) return hasCapability(id, 'tts');
-      return true;
-    }
-    if (modelFilter === 'free') return isFreeModel(id);
-    if (modelFilter === 'stt') return hasCapability(id, 'stt');
-    if (modelFilter === 'tts') return hasCapability(id, 'tts');
-    return true;
-  });
-
-  // Conta quantos grátis, STT, e TTS existem para exibir nos botões
-  const freeCount = availableModels.filter(isFreeModel).length;
-  const sttCount = availableModels.filter(id => hasCapability(id, 'stt')).length;
-  const ttsCount = availableModels.filter(id => hasCapability(id, 'tts')).length;
+  // Nome do servidor STT/TTS selecionado (ou "mesmo do chat")
+  const sttServerName = settingsV2.sttServerId
+    ? getServer(settingsV2.sttServerId)?.name ?? 'Servidor removido'
+    : 'Igual ao servidor de chat';
+  const ttsServerName = settingsV2.ttsServerId
+    ? getServer(settingsV2.ttsServerId)?.name ?? 'Servidor removido'
+    : 'Igual ao servidor de chat';
 
   return (
     <View style={s.overlay}>
@@ -384,1112 +311,1234 @@ export function SettingsScreen({settings, onChange, onClose}: Props) {
         translucent={false}
       />
       <SafeAreaView style={s.safe}>
+        <View style={s.header}>
+          <TouchableOpacity onPress={onClose} style={s.backBtn}>
+            <Icon name="arrow-back" size={24} color={theme.text} />
+          </TouchableOpacity>
+          <Text style={s.headerTitle}>Configurações</Text>
+        </View>
 
-      <View style={s.header}>
-        <TouchableOpacity onPress={onClose} style={s.backBtn}>
-          <Icon name="arrow-back" size={24} color={theme.text} />
-        </TouchableOpacity>
-        <Text style={s.headerTitle}>Configurações</Text>
-      </View>
-
-      <ScrollView contentContainerStyle={s.container}>
-        {/* Card: Provedor + dados conforme tipo (item 6 — agrupado) */}
-        <Card title="Modelo de Linguagem" icon="memory" defaultExpanded={true} theme={theme}>
-          {/* Tabs Online / Local — texto encurtado (item 6) */}
-          <View style={s.row}>
-            <TouchableOpacity
-              style={[s.tab, draft.llm.provider === 'localhost' && s.tabActive]}
-              onPress={() => updateLlm({provider: 'localhost' as LlmProvider})}>
-              <Icon
-                name="cloud-queue"
-                size={18}
-                color={draft.llm.provider === 'localhost' ? theme.accentText : theme.textSecondary}
-              />
-              <Text
-                style={[
-                  s.tabText,
-                  draft.llm.provider === 'localhost' && s.tabTextActive,
-                ]}>
-                Online
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.tab, draft.llm.provider === 'local' && s.tabActive]}
-              onPress={() => updateLlm({provider: 'local' as LlmProvider})}>
-              <Icon
-                name="smartphone"
-                size={18}
-                color={draft.llm.provider === 'local' ? theme.accentText : theme.textSecondary}
-              />
-              <Text
-                style={[
-                  s.tabText,
-                  draft.llm.provider === 'local' && s.tabTextActive,
-                ]}>
-                Local
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {draft.llm.provider === 'localhost' ? (
-            <>
-              {/* Dropdown de servidor — presets + opção Personalizado */}
-              <Text style={s.label}>Servidor</Text>
-              <TouchableOpacity
-                style={s.dropdownBtn}
-                onPress={() => setServerDropdownOpen(v => !v)}>
-                <Icon
-                  name={selectedServerIcon() as any}
-                  size={20}
-                  color={theme.accent}
-                />
-                <Text style={s.dropdownBtnText} numberOfLines={1}>
-                  {selectedServerName()}
+        <ScrollView contentContainerStyle={s.container}>
+          {/* ====================================================== */}
+          {/* Card: Servidores — lista de servidores cadastrados     */}
+          {/* ====================================================== */}
+          <Card
+            title="Servidores"
+            icon="dns"
+            defaultExpanded={true}
+            theme={theme}>
+            {allServers.length === 0 ? (
+              <>
+                <Text style={s.hint}>
+                  Nenhum servidor cadastrado. Use o onboarding para adicionar
+                  servidores.
                 </Text>
-                <Icon
-                  name={serverDropdownOpen ? 'expand-less' : 'expand-more'}
-                  size={22}
-                  color={theme.textSecondary}
-                />
-              </TouchableOpacity>
-
-              {/* Lista de opções do dropdown */}
-              {serverDropdownOpen && (
-                <View style={s.dropdownList}>
-                  {SERVER_PRESETS.map(preset => (
+                <TouchableOpacity
+                  style={s.addServerBtn}
+                  onPress={() =>
+                    Alert.alert(
+                      'Adicionar servidor',
+                      'Use o onboarding para adicionar servidores.',
+                    )
+                  }>
+                  <Icon name="add" size={20} color={theme.accentText} />
+                  <Text style={s.addServerBtnText}>Adicionar servidor</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                {allServers.map(server => {
+                  const isActive = server.id === settingsV2.activeServerId;
+                  const badgeColor = formatBadgeColor(server.format);
+                  return (
                     <TouchableOpacity
-                      key={preset.url}
-                      style={[
-                        s.dropdownItem,
-                        selectedPreset === preset.url && s.dropdownItemActive,
-                      ]}
-                      onPress={() => selectPreset(preset.url)}>
+                      key={server.id}
+                      style={[s.serverItem, isActive && s.serverItemActive]}
+                      onPress={() => selectServer(server)}
+                      disabled={isActive}>
                       <Icon
-                        name={preset.icon as any}
-                        size={18}
-                        color={selectedPreset === preset.url ? theme.accent : theme.textSecondary}
+                        name={server.icon as any}
+                        size={20}
+                        color={isActive ? theme.accent : theme.textSecondary}
                       />
-                      <Text
-                        style={[
-                          s.dropdownItemText,
-                          selectedPreset === preset.url && s.dropdownItemTextActive,
-                        ]}
-                        numberOfLines={1}>
-                        {preset.name}
-                      </Text>
-                      {preset.hasFreeModels && (
+                      <View style={s.serverItemInfo}>
+                        <Text
+                          style={[
+                            s.serverItemName,
+                            isActive && s.serverItemNameActive,
+                          ]}
+                          numberOfLines={1}>
+                          {server.name}
+                        </Text>
+                        <Text
+                          style={s.serverItemUrl}
+                          numberOfLines={1}>
+                          {server.baseUrl}
+                        </Text>
+                      </View>
+                      {/* Format badge */}
+                      <View
+                        style={[s.formatBadge, {backgroundColor: badgeColor}]}>
+                        <Text style={s.formatBadgeText}>
+                          {server.format.toUpperCase()}
+                        </Text>
+                      </View>
+                      {/* Free badge */}
+                      {server.hasFreeModels && (
                         <View style={s.freeBadge}>
                           <Text style={s.freeBadgeText}>FREE</Text>
                         </View>
                       )}
-                      {selectedPreset === preset.url && (
+                      {/* Delete button */}
+                      <TouchableOpacity
+                        style={s.serverDeleteBtn}
+                        onPress={() => handleDeleteServer(server)}
+                        disabled={deleting}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                        <Icon
+                          name="delete"
+                          size={18}
+                          color={theme.errorText}
+                        />
+                      </TouchableOpacity>
+                      {isActive && (
                         <Icon name="check" size={18} color="#3fb950" />
                       )}
                     </TouchableOpacity>
-                  ))}
-                  {/* Opção Personalizado */}
-                  <TouchableOpacity
-                    style={[
-                      s.dropdownItem,
-                      selectedPreset === CUSTOM_SERVER && s.dropdownItemActive,
-                    ]}
-                    onPress={() => selectPreset(CUSTOM_SERVER)}>
-                    <Icon
-                      name="edit"
-                      size={18}
-                      color={selectedPreset === CUSTOM_SERVER ? theme.accent : theme.textSecondary}
-                    />
-                    <Text
+                  );
+                })}
+
+                {/* Botão adicionar servidor */}
+                <TouchableOpacity
+                  style={s.addServerBtn}
+                  onPress={() =>
+                    Alert.alert(
+                      'Adicionar servidor',
+                      'Use o onboarding para adicionar servidores.',
+                    )
+                  }>
+                  <Icon name="add" size={20} color={theme.accentText} />
+                  <Text style={s.addServerBtnText}>Adicionar servidor</Text>
+                </TouchableOpacity>
+              </>
+            )}
+          </Card>
+
+          {/* ====================================================== */}
+          {/* Card: Modelo de Linguagem (chat/LLM)                   */}
+          {/* ====================================================== */}
+          <Card
+            title="Modelo de Linguagem"
+            icon="memory"
+            defaultExpanded={true}
+            theme={theme}>
+            {/* Dropdown de servidor ativo */}
+            <Text style={s.label}>Servidor ativo</Text>
+            <TouchableOpacity
+              style={s.dropdownBtn}
+              onPress={() => setServerDropdownOpen(v => !v)}>
+              <Icon
+                name={(activeServer?.icon ?? 'dns') as any}
+                size={20}
+                color={theme.accent}
+              />
+              <Text style={s.dropdownBtnText} numberOfLines={1}>
+                {activeServer?.name ?? 'Nenhum servidor selecionado'}
+              </Text>
+              <Icon
+                name={serverDropdownOpen ? 'expand-less' : 'expand-more'}
+                size={22}
+                color={theme.textSecondary}
+              />
+            </TouchableOpacity>
+
+            {serverDropdownOpen && (
+              <View style={s.dropdownList}>
+                {allServers.map(server => {
+                  const isActive = server.id === settingsV2.activeServerId;
+                  return (
+                    <TouchableOpacity
+                      key={server.id}
                       style={[
-                        s.dropdownItemText,
-                        selectedPreset === CUSTOM_SERVER && s.dropdownItemTextActive,
+                        s.dropdownItem,
+                        isActive && s.dropdownItemActive,
                       ]}
-                      numberOfLines={1}>
-                      Personalizado
-                    </Text>
-                    {selectedPreset === CUSTOM_SERVER && (
-                      <Icon name="check" size={18} color="#3fb950" />
-                    )}
-                  </TouchableOpacity>
-                </View>
-              )}
+                      onPress={() => selectServer(server)}>
+                      <Icon
+                        name={server.icon as any}
+                        size={18}
+                        color={isActive ? theme.accent : theme.textSecondary}
+                      />
+                      <Text
+                        style={[
+                          s.dropdownItemText,
+                          isActive && s.dropdownItemTextActive,
+                        ]}
+                        numberOfLines={1}>
+                        {server.name}
+                      </Text>
+                      {isActive && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+                {allServers.length === 0 && (
+                  <Text style={s.emptyText}>Nenhum servidor cadastrado.</Text>
+                )}
+              </View>
+            )}
 
-              {/* Campo de URL — só visível quando Personalizado */}
-              {selectedPreset === CUSTOM_SERVER && (
-                <>
-                  <Text style={s.label}>URL do servidor</Text>
-                  <TextInput
-                    style={s.input}
-                    value={draft.llm.baseUrl}
-                    placeholder="http://192.168.0.10:11434/v1"
-                    placeholderTextColor={theme.textMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    onChangeText={v => updateLlm({baseUrl: v})}
-                  />
-                </>
-              )}
+            {activeServer && (
+              <Text style={s.urlDisplay} numberOfLines={2}>
+                {activeServer.baseUrl}
+              </Text>
+            )}
 
-              {/* URL do preset selecionado (read-only, informativo) */}
-              {selectedPreset !== CUSTOM_SERVER && (
-                <Text style={s.urlDisplay} numberOfLines={2}>
-                  {selectedPreset}
+            {/* Lista de modelos do servidor ativo */}
+            <Text style={s.label}>Modelo</Text>
+            {!activeServerId ? (
+              <Text style={s.hint}>
+                Selecione um servidor acima para ver os modelos disponíveis.
+              </Text>
+            ) : sortedServerModels.length === 0 ? (
+              <Text style={s.hint}>
+                Nenhum modelo. Volte ao onboarding ou adicione um servidor para
+                buscar modelos.
+              </Text>
+            ) : (
+              <View style={s.dropdownList}>
+                {sortedServerModels.map(model => {
+                  const isActive = model.id === settingsV2.activeModelId;
+                  return (
+                    <TouchableOpacity
+                      key={model.id}
+                      style={[
+                        s.dropdownItem,
+                        isActive && s.dropdownItemActive,
+                      ]}
+                      onPress={() => selectModel(model)}>
+                      <Icon
+                        name={model.isFavorite ? 'star' : 'memory'}
+                        size={18}
+                        color={isActive ? theme.accent : model.isFavorite ? '#e3b341' : theme.textSecondary}
+                      />
+                      <View style={{flex: 1}}>
+                        <Text
+                          style={[
+                            s.dropdownItemText,
+                            isActive && s.dropdownItemTextActive,
+                          ]}
+                          numberOfLines={1}>
+                          {modelDisplayName(model)}
+                        </Text>
+                        {/* badges inline */}
+                        <View
+                          style={{
+                            flexDirection: 'row',
+                            gap: 4,
+                            marginTop: 2,
+                            flexWrap: 'wrap',
+                          }}>
+                          {renderAllBadges(model, s)}
+                          {model.isFree && (
+                            <View style={s.freeBadge}>
+                              <Text style={s.freeBadgeText}>FREE</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      {isActive && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Modelo ativo selecionado (destaque) */}
+            {activeModel && (
+              <View style={s.sttModelSelected}>
+                <Icon name="check-circle" size={14} color="#3fb950" />
+                <Text style={s.sttModelSelectedText}>
+                  {displayModelName(activeModel.modelId)}
                 </Text>
-              )}
-
-              <Text style={s.label}>API Key (opcional)</Text>
-              <TextInput
-                style={s.input}
-                value={draft.llm.apiKey}
-                placeholder="Bearer token"
-                placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry
-                onChangeText={v => updateLlm({apiKey: v})}
-              />
-
-              <Text style={s.label}>Modelo</Text>
-              <View style={s.modelRow}>
-                <TextInput
-                  style={[s.input, s.modelInput]}
-                  value={draft.llm.model}
-                  placeholder="llama3, qwen2.5, etc"
-                  placeholderTextColor={theme.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={v => updateLlm({model: v})}
-                />
-                <TouchableOpacity
-                  style={s.fetchBtn}
-                  onPress={fetchModels}
-                  disabled={fetchingModels}>
-                  {fetchingModels ? (
-                    <ActivityIndicator size="small" color={theme.accentText} />
-                  ) : (
-                    <Icon name="search" size={20} color={theme.accentText} />
-                  )}
-                </TouchableOpacity>
               </View>
-              <Text style={s.hint}>
-                Toque no ícone de busca para listar modelos disponíveis no servidor.
-              </Text>
-            </>
-          ) : (
-            <>
-              <Text style={s.hint}>
-                Modelo GGUF no dispositivo (llama.rn). Download na tela principal.
-              </Text>
-              <Text style={s.label}>Caminho do modelo</Text>
-              <TextInput
-                style={s.input}
-                value={draft.llm.localModelPath ?? ''}
-                placeholder="/data/.../models/model.gguf"
-                placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                onChangeText={v => updateLlm({localModelPath: v})}
-              />
-            </>
-          )}
-        </Card>
+            )}
+          </Card>
 
-        {/* Card: Voz (STT) — toggle online/on-device */}
-        <Card title="Voz (STT)" icon="mic" theme={theme}>
-          {/* Toggle: Online ↔ On-device (Online à esquerda, On-device à direita) */}
-          <View style={s.row}>
-            <TouchableOpacity
-              style={[s.tab, draft.sttMode === 'online' && s.tabActive]}
-              onPress={() => update({sttMode: 'online'})}>
-              <Icon
-                name="cloud-queue"
-                size={18}
-                color={draft.sttMode === 'online' ? theme.accentText : theme.textSecondary}
-              />
-              <Text
-                style={[
-                  s.tabText,
-                  draft.sttMode === 'online' && s.tabTextActive,
-                ]}>
-                Online
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.tab, (draft.sttMode ?? 'on-device') === 'on-device' && s.tabActive]}
-              onPress={() => update({sttMode: 'on-device'})}>
-              <Icon
-                name="smartphone"
-                size={18}
-                color={(draft.sttMode ?? 'on-device') === 'on-device' ? theme.accentText : theme.textSecondary}
-              />
-              <Text
-                style={[
-                  s.tabText,
-                  (draft.sttMode ?? 'on-device') === 'on-device' && s.tabTextActive,
-                ]}>
-                On-device
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {(draft.sttMode ?? 'on-device') === 'on-device' ? (
-            <>
-              <Text style={s.hint}>
-                Modelo Whisper GGUF no dispositivo. Deixe vazio para desativar.
-                Ex: ggml-tiny.bin (~75 MB).
-              </Text>
-              <Text style={s.label}>Caminho do modelo</Text>
-              <TextInput
-                style={s.input}
-                value={draft.sttModelPath ?? ''}
-                placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
-                placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                onChangeText={v => update({sttModelPath: v})}
-              />
-            </>
-          ) : (
-            <>
-              <Text style={s.hint}>
-                Transcrição via API online (Groq, OpenAI, etc). Usa o modelo
-                selecionado abaixo com o servidor atual{draft.sttServerOverride?.trim() ? ' (override)' : ''}.
-              </Text>
-              <Text style={s.label}>Modelo STT online</Text>
-              <View style={s.modelRow}>
-                <TextInput
-                  style={[s.input, s.modelInput]}
-                  value={draft.sttOnlineModel ?? ''}
-                  placeholder="whisper-large-v3, whisper-large-v3-turbo, etc"
-                  placeholderTextColor={theme.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={v => update({sttOnlineModel: v})}
+          {/* ====================================================== */}
+          {/* Card: Voz (STT) — toggle online/on-device + modelo     */}
+          {/* ====================================================== */}
+          <Card title="Voz (STT)" icon="mic" theme={theme}>
+            {/* Toggle: Online ↔ On-device */}
+            <View style={s.row}>
+              <TouchableOpacity
+                style={[s.tab, settingsV2.sttMode === 'online' && s.tabActive]}
+                onPress={() => onChangeV2({sttMode: 'online'})}>
+                <Icon
+                  name="cloud-queue"
+                  size={18}
+                  color={
+                    settingsV2.sttMode === 'online'
+                      ? theme.accentText
+                      : theme.textSecondary
+                  }
                 />
-                <TouchableOpacity
-                  style={s.fetchBtn}
-                  onPress={async () => {
-                    // Usa o mesmo fetch de modelos do servidor LLM atual
-                    if (!draft.llm.baseUrl?.trim() && !draft.sttServerOverride?.trim()) {
-                      Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
-                      return;
-                    }
-                    setFetchingModels(true);
-                    setModelFilter('all');
-                    try {
-                      const baseUrl = (draft.sttServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
-                      let url: string;
-                      let useQueryParamKey = false;
-                      if (baseUrl.includes('openrouter.ai')) {
-                        url = 'https://openrouter.ai/api/v1/models';
-                      } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-                        url = `${baseUrl}/models`;
-                        useQueryParamKey = true;
-                      } else {
-                        url = `${baseUrl}/models`;
-                      }
-                      const apiKey = draft.sttServerOverride?.trim()
-                        ? await loadApiKeyForServer(draft.sttServerOverride.trim())
-                        : draft.llm.apiKey ?? '';
-                      const headers: Record<string, string> = {};
-                      if (apiKey && !useQueryParamKey) {
-                        headers['Authorization'] = `Bearer ${apiKey}`;
-                      }
-                      if (useQueryParamKey && apiKey) {
-                        url = `${url}?key=${encodeURIComponent(apiKey)}`;
-                      }
-                      const response = await fetch(url, {
-                        method: 'GET',
-                        headers,
-                      });
-                      if (!response.ok) {
-                        const errText = await response.text();
-                        throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
-                      }
-                      const data = await response.json();
-                      const models: RemoteModel[] = data?.data ?? data?.models ?? [];
-                      const ids = models
-                        .map(m => {
-                          const raw = m.id ?? m.name ?? '';
-                          if (typeof raw !== 'string') return '';
-                          return raw.replace(/^models\//, '');
-                        })
-                        .filter((id): id is string => id.length > 0);
-                      if (ids.length === 0) {
-                        Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
-                        return;
-                      }
-                      ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
-                      // Pré-filtra STT para focar em modelos de transcrição
-                      setAvailableModels(ids);
-                      setSttPickerMode(true);
-                      setShowModelsModal(true);
-                    } catch (e) {
-                      Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
-                    } finally {
-                      setFetchingModels(false);
-                    }
-                  }}
-                  disabled={fetchingModels}>
-                  {fetchingModels ? (
-                    <ActivityIndicator size="small" color={theme.accentText} />
-                  ) : (
-                    <Icon name="search" size={20} color={theme.accentText} />
-                  )}
-                </TouchableOpacity>
-              </View>
-              {draft.sttOnlineModel?.trim() && (
-                <View style={s.sttModelSelected}>
-                  <Icon name="check-circle" size={14} color="#f0883e" />
-                  <Text style={s.sttModelSelectedText}>
-                    {draft.sttOnlineModel}
-                  </Text>
-                </View>
-              )}
+                <Text
+                  style={[
+                    s.tabText,
+                    settingsV2.sttMode === 'online' && s.tabTextActive,
+                  ]}>
+                  Online
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  s.tab,
+                  settingsV2.sttMode === 'on-device' && s.tabActive,
+                ]}
+                onPress={() => onChangeV2({sttMode: 'on-device'})}>
+                <Icon
+                  name="smartphone"
+                  size={18}
+                  color={
+                    settingsV2.sttMode === 'on-device'
+                      ? theme.accentText
+                      : theme.textSecondary
+                  }
+                />
+                <Text
+                  style={[
+                    s.tabText,
+                    settingsV2.sttMode === 'on-device' && s.tabTextActive,
+                  ]}>
+                  On-device
+                </Text>
+              </TouchableOpacity>
+            </View>
 
-              {/* Override de servidor STT (opcional) */}
-              <Text style={s.label}>Servidor STT (opcional)</Text>
-              <TextInput
-                style={s.input}
-                value={draft.sttServerOverride ?? ''}
-                placeholder="Deixe vazio para usar o mesmo do chat"
-                placeholderTextColor={theme.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                onChangeText={v => update({sttServerOverride: v})}
-              />
-              <Text style={s.hint}>
-                Por padrão usa a URL+API Key do servidor de chat. Preencha
-                para usar um servidor diferente só para STT (ex: Groq mesmo
-                que o chat use outro).
-              </Text>
-            </>
-          )}
-        </Card>
-
-        {/* Card: Voz (TTS) — síntese de áudio via API online */}
-        <Card title="Voz (TTS)" icon="volume-up" theme={theme}>
-          {(() => {
-            const ttsBaseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl || '');
-            const isGemini = ttsBaseUrl.includes('generativelanguage.googleapis.com');
-            return (
+            {settingsV2.sttMode === 'on-device' ? (
               <>
                 <Text style={s.hint}>
-                  {isGemini
-                    ? 'Síntese de voz via Google AI Studio (Gemini). Retorna áudio PCM 24kHz (convertido para WAV).'
-                    : 'Síntese de voz via API online (Groq TTS, OpenAI TTS, etc).'}{' '}
-                  Usa o modelo selecionado abaixo com o servidor
-                  atual{draft.ttsServerOverride?.trim() ? ' (override)' : ''}.
+                  Modelo Whisper GGUF no dispositivo. Deixe vazio para
+                  desativar. Ex: ggml-tiny.bin (~75 MB).
                 </Text>
-                <Text style={s.label}>Modelo TTS</Text>
-                <View style={s.modelRow}>
-                  <TextInput
-                    style={[s.input, s.modelInput]}
-                    value={draft.ttsOnlineModel ?? ''}
-                    placeholder={isGemini ? 'gemini-2.5-flash-preview-tts' : 'tts-1, tts-1-hd, etc'}
-                    placeholderTextColor={theme.textMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    onChangeText={v => update({ttsOnlineModel: v})}
+                <Text style={s.label}>Caminho do modelo</Text>
+                <TextInput
+                  style={s.input}
+                  value={settingsV2.sttModelPath ?? ''}
+                  placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  onChangeText={v => onChangeV2({sttModelPath: v})}
+                />
+              </>
+            ) : (
+              <>
+                <Text style={s.hint}>
+                  Transcrição via API online (Groq, OpenAI, etc). Escolha o
+                  servidor e modelo STT abaixo.
+                </Text>
+
+                {/* Servidor STT (override) — null = mesmo do chat */}
+                <Text style={s.label}>Servidor STT</Text>
+                <TouchableOpacity
+                  style={s.dropdownBtn}
+                  onPress={() => setSttServerDropdownOpen(v => !v)}>
+                  <Icon
+                    name="cloud-queue"
+                    size={20}
+                    color={theme.accent}
                   />
-                  <TouchableOpacity
-                    style={s.fetchBtn}
-                    onPress={async () => {
-                      if (!draft.llm.baseUrl?.trim() && !draft.ttsServerOverride?.trim()) {
-                        Alert.alert('URL vazia', 'Preencha a URL do servidor antes de buscar modelos.');
-                        return;
-                      }
-                      setFetchingModels(true);
-                      setModelFilter('all');
-                      try {
-                        const baseUrl = (draft.ttsServerOverride?.trim() || draft.llm.baseUrl).replace(/\/+$/, '');
-                        let url: string;
-                        let useQueryParamKey = false;
-                        if (baseUrl.includes('openrouter.ai')) {
-                          url = 'https://openrouter.ai/api/v1/models';
-                        } else if (baseUrl.includes('generativelanguage.googleapis.com')) {
-                          url = `${baseUrl}/models`;
-                          useQueryParamKey = true;
-                        } else {
-                          url = `${baseUrl}/models`;
+                  <Text style={s.dropdownBtnText} numberOfLines={1}>
+                    {sttServerName}
+                  </Text>
+                  <Icon
+                    name={
+                      sttServerDropdownOpen ? 'expand-less' : 'expand-more'
+                    }
+                    size={22}
+                    color={theme.textSecondary}
+                  />
+                </TouchableOpacity>
+
+                {sttServerDropdownOpen && (
+                  <View style={s.dropdownList}>
+                    {/* Null = same as chat server */}
+                    <TouchableOpacity
+                      style={[
+                        s.dropdownItem,
+                        settingsV2.sttServerId === null &&
+                          s.dropdownItemActive,
+                      ]}
+                      onPress={() => selectSttServer(null)}>
+                      <Icon
+                        name="repeat"
+                        size={18}
+                        color={
+                          settingsV2.sttServerId === null
+                            ? theme.accent
+                            : theme.textSecondary
                         }
-                        const apiKey = draft.ttsServerOverride?.trim()
-                          ? await loadApiKeyForServer(draft.ttsServerOverride.trim())
-                          : draft.llm.apiKey ?? '';
-                        const headers: Record<string, string> = {};
-                        if (apiKey && !useQueryParamKey) {
-                          headers['Authorization'] = `Bearer ${apiKey}`;
-                        }
-                        if (useQueryParamKey && apiKey) {
-                          url = `${url}?key=${encodeURIComponent(apiKey)}`;
-                        }
-                        const response = await fetch(url, {method: 'GET', headers});
-                        if (!response.ok) {
-                          const errText = await response.text();
-                          throw new Error(`HTTP ${response.status}: ${errText.slice(0, 200)}`);
-                        }
-                        const data = await response.json();
-                        const models: RemoteModel[] = data?.data ?? data?.models ?? [];
-                        const ids = models
-                          .map(m => {
-                            const raw = m.id ?? m.name ?? '';
-                            if (typeof raw !== 'string') return '';
-                            return raw.replace(/^models\//, '');
-                          })
-                          .filter((id): id is string => id.length > 0);
-                        if (ids.length === 0) {
-                          Alert.alert('Vazio', 'Servidor respondeu, mas nenhum modelo encontrado.');
-                          return;
-                        }
-                        ids.sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
-                        setAvailableModels(ids);
-                        setTtsPickerMode(true);
-                        setShowModelsModal(true);
-                      } catch (e) {
-                        Alert.alert('Falha ao buscar', (e as Error).message ?? String(e));
-                      } finally {
-                        setFetchingModels(false);
-                      }
-                    }}
-                    disabled={fetchingModels}>
-                    {fetchingModels ? (
-                      <ActivityIndicator size="small" color={theme.accentText} />
-                    ) : (
-                      <Icon name="search" size={20} color={theme.accentText} />
-                    )}
-                  </TouchableOpacity>
-                </View>
-                {draft.ttsOnlineModel?.trim() && (
-                  <View style={s.sttModelSelected}>
-                    <Icon name="check-circle" size={14} color="#2dd4bf" />
-                    <Text style={s.sttModelSelectedText}>
-                      {draft.ttsOnlineModel}
-                    </Text>
+                      />
+                      <Text
+                        style={[
+                          s.dropdownItemText,
+                          settingsV2.sttServerId === null &&
+                            s.dropdownItemTextActive,
+                        ]}
+                        numberOfLines={1}>
+                        Igual ao servidor de chat
+                      </Text>
+                      {settingsV2.sttServerId === null && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                    {allServers.map(server => {
+                      const isActive = server.id === settingsV2.sttServerId;
+                      return (
+                        <TouchableOpacity
+                          key={server.id}
+                          style={[
+                            s.dropdownItem,
+                            isActive && s.dropdownItemActive,
+                          ]}
+                          onPress={() => selectSttServer(server.id)}>
+                          <Icon
+                            name={server.icon as any}
+                            size={18}
+                            color={
+                              isActive ? theme.accent : theme.textSecondary
+                            }
+                          />
+                          <Text
+                            style={[
+                              s.dropdownItemText,
+                              isActive && s.dropdownItemTextActive,
+                            ]}
+                            numberOfLines={1}>
+                            {server.name}
+                          </Text>
+                          {isActive && (
+                            <Icon name="check" size={18} color="#3fb950" />
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 )}
 
-                {/* Voz */}
-                <Text style={s.label}>Voz</Text>
-                <TextInput
-                  style={s.input}
-                  value={draft.ttsVoice ?? ''}
-                  placeholder={isGemini ? 'Kore, Charon, Aoede, Fenrir...' : 'alloy, nova, shimmer, echo, fable, onyx'}
-                  placeholderTextColor={theme.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={v => update({ttsVoice: v})}
-                />
-                <Text style={s.hint}>
-                  {isGemini
-                    ? 'Vozes Gemini: Achernar, Aoede, Charon, Kore, Fenrir, Leda, Puck, Zephyr, etc. Deixe vazio para Kore (padrão).'
-                    : 'Vozes podem variar por provedor. OpenAI/Groq: alloy, nova, shimmer, echo, fable, onyx. Deixe vazio para alloy.'}
-                </Text>
-
-                {/* Override de servidor TTS (opcional) */}
-                <Text style={s.label}>Servidor TTS (opcional)</Text>
-                <TextInput
-                  style={s.input}
-                  value={draft.ttsServerOverride ?? ''}
-                  placeholder="Deixe vazio para usar o mesmo do chat"
-                  placeholderTextColor={theme.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={v => update({ttsServerOverride: v})}
-                />
-                <Text style={s.hint}>
-                  Por padrão usa a URL+API Key do servidor de chat. Preencha
-                  para usar um servidor diferente só para TTS.
-                </Text>
-              </>
-            );
-          })()}
-        </Card>
-
-        {/* Card: Misc — agrupa Prompt do Sistema + Streaming de Respostas */}
-        <Card title="Misc" icon="settings" theme={theme}>
-          {/* Sub-seção: Prompt do Sistema */}
-          <Text style={[s.subSectionTitle, {marginTop: 0}]}>Prompt do Sistema</Text>
-          <TextInput
-            style={[s.input, s.textarea]}
-            value={draft.systemPrompt}
-            multiline
-            numberOfLines={4}
-            onChangeText={v => update({systemPrompt: v})}
-          />
-          <Text style={s.hint}>
-            Instruções base que definem o comportamento do assistant. Aplicadas ao
-            início de toda conversa.
-          </Text>
-
-          {/* Sub-seção: Tema da Interface */}
-          <Text style={s.subSectionTitle}>Tema da Interface</Text>
-          <View style={{flexDirection: 'row', gap: 8, marginBottom: 6}}>
-            <TouchableOpacity
-              style={[
-                s.themeOption,
-                (draft.theme ?? 'dark') === 'dark' && s.themeOptionActive,
-              ]}
-              onPress={() => update({theme: 'dark'})}>
-              <Icon name="dark-mode" size={20} color={(draft.theme ?? 'dark') === 'dark' ? theme.accent : theme.textSecondary} />
-              <Text style={[
-                s.themeOptionLabel,
-                (draft.theme ?? 'dark') === 'dark' && s.themeOptionLabelActive,
-              ]}>Escuro</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                s.themeOption,
-                draft.theme === 'light' && s.themeOptionActive,
-              ]}
-              onPress={() => update({theme: 'light'})}>
-              <Icon name="light-mode" size={20} color={draft.theme === 'light' ? theme.accent : theme.textSecondary} />
-              <Text style={[
-                s.themeOptionLabel,
-                draft.theme === 'light' && s.themeOptionLabelActive,
-              ]}>Claro</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Sub-seção: Streaming de Respostas */}
-          <Text style={s.subSectionTitle}>Streaming de Respostas</Text>
-          <TouchableOpacity
-            style={s.toggleRow}
-            onPress={() =>
-              update({streamingEnabled: !draft.streamingEnabled})
-            }>
-            <Text style={s.toggleLabel}>
-              Receber respostas em tempo real
-            </Text>
-            <Icon
-              name={streamingCheckboxIcon(draft.streamingEnabled === true)}
-              size={24}
-              color={draft.streamingEnabled === true ? '#3fb950' : theme.textSecondary}
-            />
-          </TouchableOpacity>
-          <Text style={s.hint}>
-            Quando ativo, os tokens aparecem conforme chegam (SSE). Desative se
-            seu servidor não suporta streaming ou prefere aguardar a resposta
-            completa de uma vez.
-          </Text>
-        </Card>
-      </ScrollView>
-
-      {/* Modal de seleção de modelos */}
-      <Modal visible={showModelsModal} transparent animationType="fade">
-        <View style={s.modalOverlay}>
-          <View style={s.modalCard}>
-            <View style={s.modalHeader}>
-              <Text style={s.modalTitle}>
-                {ttsPickerMode
-                  ? 'Modelos TTS disponíveis'
-                  : sttPickerMode
-                  ? 'Modelos STT disponíveis'
-                  : 'Modelos disponíveis'}
-              </Text>
-              <TouchableOpacity onPress={() => setShowModelsModal(false)} hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                <Icon name="close" size={22} color={theme.textSecondary} />
-              </TouchableOpacity>
-            </View>
-
-            {/* Filtro: Todos | Gratuitos | STT | TTS */}
-            <View style={s.filterRow}>
-              <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'all' && s.filterBtnActive]}
-                onPress={() => setModelFilter('all')}>
-                <Text style={[s.filterBtnText, modelFilter === 'all' && s.filterBtnTextActive]}>
-                  Todos ({availableModels.length})
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'free' && s.filterBtnFreeActive]}
-                onPress={() => setModelFilter('free')}>
-                <Icon name="volunteer-activism" size={14} color={modelFilter === 'free' ? theme.accentText : '#3fb950'} />
-                <Text style={[s.filterBtnText, modelFilter === 'free' && s.filterBtnTextActive]}>
-                  Grátis ({freeCount})
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'stt' && s.filterBtnSttActive]}
-                onPress={() => setModelFilter('stt')}>
-                <Icon name="mic" size={14} color={modelFilter === 'stt' ? theme.accentText : '#f0883e'} />
-                <Text style={[s.filterBtnText, modelFilter === 'stt' && s.filterBtnTextActive]}>
-                  STT ({sttCount})
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.filterBtn, modelFilter === 'tts' && s.filterBtnTtsActive]}
-                onPress={() => setModelFilter('tts')}>
-                <Icon name="volume-up" size={14} color={modelFilter === 'tts' ? theme.accentText : '#2dd4bf'} />
-                <Text style={[s.filterBtnText, modelFilter === 'tts' && s.filterBtnTextActive]}>
-                  TTS ({ttsCount})
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <FlatList
-              data={filteredModels}
-              keyExtractor={(item, idx) => `${item}-${idx}`}
-              renderItem={({item}) => {
-                const badges = getModelBadges(item);
-                return (
-                  <TouchableOpacity
-                    style={s.modelItem}
-                    onPress={() => pickModel(item)}>
-                    <Icon name="memory" size={20} color={isFreeModel(item) ? '#3fb950' : theme.accent} />
-                    <Text style={s.modelItemText} numberOfLines={1}>
-                      {shortModelName(item)}
-                    </Text>
-                    {badges.map(badge => {
-                      if (badge.type === 'vision') {
-                        return (
-                          <View key="vision" style={s.visionBadge}>
-                            <Icon name="visibility" size={10} color="#a371f7" />
-                            <Text style={s.visionBadgeText}>VISÃO</Text>
-                          </View>
-                        );
-                      }
-                      if (badge.type === 'stt') {
-                        return (
-                          <View key="stt" style={s.sttBadge}>
-                            <Icon name="mic" size={10} color="#f0883e" />
-                            <Text style={s.sttBadgeText}>STT</Text>
-                          </View>
-                        );
-                      }
-                      if (badge.type === 'tts') {
-                        return (
-                          <View key="tts" style={s.ttsBadge}>
-                            <Icon name="volume-up" size={10} color="#2dd4bf" />
-                            <Text style={s.ttsBadgeText}>TTS</Text>
-                          </View>
-                        );
-                      }
-                      // anyToAny
+                {/* Lista de modelos STT (de todos os servidores) */}
+                <Text style={s.label}>Modelo STT online</Text>
+                {sortedSttModels.length === 0 ? (
+                  <Text style={s.hint}>
+                    Nenhum modelo STT encontrado. Volte ao onboarding ou
+                    adicione um servidor com modelos de transcrição.
+                  </Text>
+                ) : (
+                  <View style={s.dropdownList}>
+                    {sortedSttModels.map(model => {
+                      const isActive =
+                        model.id === settingsV2.activeSttModelId;
+                      const modelServer = getServer(model.serverId);
                       return (
-                        <View key="any" style={s.anyBadge}>
-                          <Icon name="all-inclusive" size={10} color="#d2a8ff" />
-                          <Text style={s.anyBadgeText}>ANY→ANY</Text>
-                        </View>
+                        <TouchableOpacity
+                          key={model.id}
+                          style={[
+                            s.dropdownItem,
+                            isActive && s.dropdownItemActive,
+                          ]}
+                          onPress={() => selectSttModel(model)}>
+                          <Icon
+                            name={model.isFavorite ? 'star' : 'mic'}
+                            size={18}
+                            color={
+                              isActive
+                                ? theme.accent
+                                : model.isFavorite
+                                ? '#e3b341'
+                                : theme.textSecondary
+                            }
+                          />
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={[
+                                s.dropdownItemText,
+                                isActive && s.dropdownItemTextActive,
+                              ]}
+                              numberOfLines={1}>
+                              {modelDisplayName(model)}
+                              {modelServer ? ` · ${modelServer.name}` : ''}
+                            </Text>
+                            <View
+                              style={{
+                                flexDirection: 'row',
+                                gap: 4,
+                                marginTop: 2,
+                                flexWrap: 'wrap',
+                              }}>
+                              {renderBadges(model.modelId, s)}
+                              {model.isFree && (
+                                <View style={s.freeBadge}>
+                                  <Text style={s.freeBadgeText}>FREE</Text>
+                                </View>
+                              )}
+                            </View>
+                          </View>
+                          {isActive && (
+                            <Icon name="check" size={18} color="#3fb950" />
+                          )}
+                        </TouchableOpacity>
                       );
                     })}
-                    {isFreeModel(item) && (
-                      <View style={s.freeBadge}>
-                        <Text style={s.freeBadgeText}>FREE</Text>
-                      </View>
-                    )}
-                    {item === (ttsPickerMode ? draft.ttsOnlineModel : sttPickerMode ? draft.sttOnlineModel : draft.llm.model) && (
-                      <Icon name="check" size={20} color="#3fb950" />
-                    )}
-                  </TouchableOpacity>
-                );
-              }}
-              ListEmptyComponent={
-                <Text style={s.emptyText}>
-                  {modelFilter === 'free'
-                    ? 'Nenhum modelo gratuito encontrado.'
-                    : modelFilter === 'stt'
-                    ? 'Nenhum modelo STT encontrado.'
-                    : modelFilter === 'tts'
-                    ? 'Nenhum modelo TTS encontrado.'
-                    : 'Nenhum modelo encontrado.'}
-                </Text>
-              }
-              style={{maxHeight: 320}}
-            />
+                  </View>
+                )}
+
+                {/* Modelo STT ativo selecionado (destaque) */}
+                {activeSttModel && (
+                  <View style={s.sttModelSelected}>
+                    <Icon name="check-circle" size={14} color="#f0883e" />
+                    <Text style={s.sttModelSelectedText}>
+                      {displayModelName(activeSttModel.modelId)}
+                    </Text>
+                  </View>
+                )}
+              </>
+            )}
+          </Card>
+
+          {/* ====================================================== */}
+          {/* Card: Voz (TTS) — síntese de áudio                     */}
+          {/* ====================================================== */}
+          <Card title="Voz (TTS)" icon="volume-up" theme={theme}>
+            <Text style={s.hint}>
+              Síntese de voz via API online (Groq TTS, OpenAI TTS, etc). Escolha
+              o servidor e modelo TTS abaixo.
+            </Text>
+
+            {/* Servidor TTS (override) — null = mesmo do chat */}
+            <Text style={s.label}>Servidor TTS</Text>
             <TouchableOpacity
-              style={s.modalCloseBtn}
-              onPress={() => setShowModelsModal(false)}>
-              <Text style={s.modalCloseText}>Fechar</Text>
+              style={s.dropdownBtn}
+              onPress={() => setTtsServerDropdownOpen(v => !v)}>
+              <Icon name="cloud-queue" size={20} color={theme.accent} />
+              <Text style={s.dropdownBtnText} numberOfLines={1}>
+                {ttsServerName}
+              </Text>
+              <Icon
+                name={ttsServerDropdownOpen ? 'expand-less' : 'expand-more'}
+                size={22}
+                color={theme.textSecondary}
+              />
             </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+
+            {ttsServerDropdownOpen && (
+              <View style={s.dropdownList}>
+                <TouchableOpacity
+                  style={[
+                    s.dropdownItem,
+                    settingsV2.ttsServerId === null && s.dropdownItemActive,
+                  ]}
+                  onPress={() => selectTtsServer(null)}>
+                  <Icon
+                    name="repeat"
+                    size={18}
+                    color={
+                      settingsV2.ttsServerId === null
+                        ? theme.accent
+                        : theme.textSecondary
+                    }
+                  />
+                  <Text
+                    style={[
+                      s.dropdownItemText,
+                      settingsV2.ttsServerId === null &&
+                        s.dropdownItemTextActive,
+                    ]}
+                    numberOfLines={1}>
+                    Igual ao servidor de chat
+                  </Text>
+                  {settingsV2.ttsServerId === null && (
+                    <Icon name="check" size={18} color="#3fb950" />
+                  )}
+                </TouchableOpacity>
+                {allServers.map(server => {
+                  const isActive = server.id === settingsV2.ttsServerId;
+                  return (
+                    <TouchableOpacity
+                      key={server.id}
+                      style={[
+                        s.dropdownItem,
+                        isActive && s.dropdownItemActive,
+                      ]}
+                      onPress={() => selectTtsServer(server.id)}>
+                      <Icon
+                        name={server.icon as any}
+                        size={18}
+                        color={isActive ? theme.accent : theme.textSecondary}
+                      />
+                      <Text
+                        style={[
+                          s.dropdownItemText,
+                          isActive && s.dropdownItemTextActive,
+                        ]}
+                        numberOfLines={1}>
+                        {server.name}
+                      </Text>
+                      {isActive && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Lista de modelos TTS (de todos os servidores) */}
+            <Text style={s.label}>Modelo TTS</Text>
+            {sortedTtsModels.length === 0 ? (
+              <Text style={s.hint}>
+                Nenhum modelo TTS encontrado. Volte ao onboarding ou adicione
+                um servidor com modelos de síntese de voz.
+              </Text>
+            ) : (
+              <View style={s.dropdownList}>
+                {sortedTtsModels.map(model => {
+                  const isActive = model.id === settingsV2.activeTtsModelId;
+                  const modelServer = getServer(model.serverId);
+                  return (
+                    <TouchableOpacity
+                      key={model.id}
+                      style={[
+                        s.dropdownItem,
+                        isActive && s.dropdownItemActive,
+                      ]}
+                      onPress={() => selectTtsModel(model)}>
+                      <Icon
+                        name={model.isFavorite ? 'star' : 'volume-up'}
+                        size={18}
+                        color={
+                          isActive
+                            ? theme.accent
+                            : model.isFavorite
+                            ? '#e3b341'
+                            : theme.textSecondary
+                        }
+                      />
+                      <View style={{flex: 1}}>
+                        <Text
+                          style={[
+                            s.dropdownItemText,
+                            isActive && s.dropdownItemTextActive,
+                          ]}
+                          numberOfLines={1}>
+                          {modelDisplayName(model)}
+                          {modelServer ? ` · ${modelServer.name}` : ''}
+                        </Text>
+                        <View
+                          style={{
+                            flexDirection: 'row',
+                            gap: 4,
+                            marginTop: 2,
+                            flexWrap: 'wrap',
+                          }}>
+                          {renderBadges(model.modelId, s)}
+                          {model.isFree && (
+                            <View style={s.freeBadge}>
+                              <Text style={s.freeBadgeText}>FREE</Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+                      {isActive && (
+                        <Icon name="check" size={18} color="#3fb950" />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Modelo TTS ativo selecionado (destaque) */}
+            {activeTtsModel && (
+              <View style={s.sttModelSelected}>
+                <Icon name="check-circle" size={14} color="#2dd4bf" />
+                <Text style={s.sttModelSelectedText}>
+                  {displayModelName(activeTtsModel.modelId)}
+                </Text>
+              </View>
+            )}
+
+            {/* Voz */}
+            <Text style={s.label}>Voz</Text>
+            <TextInput
+              style={s.input}
+              value={settingsV2.ttsVoice ?? ''}
+              placeholder="alloy, nova, shimmer, echo, fable, onyx"
+              placeholderTextColor={theme.textMuted}
+              autoCapitalize="none"
+              autoCorrect={false}
+              onChangeText={v => onChangeV2({ttsVoice: v})}
+            />
+            <Text style={s.hint}>
+              Vozes podem variar por provedor. OpenAI/Groq: alloy, nova,
+              shimmer, echo, fable, onyx. Deixe vazio para alloy.
+            </Text>
+          </Card>
+
+          {/* ====================================================== */}
+          {/* Card: Misc — prompt + tema + streaming                 */}
+          {/* ====================================================== */}
+          <Card title="Misc" icon="settings" theme={theme}>
+            {/* Sub-seção: Prompt do Sistema */}
+            <Text style={[s.subSectionTitle, {marginTop: 0}]}>
+              Prompt do Sistema
+            </Text>
+            <TextInput
+              style={[s.input, s.textarea]}
+              value={settingsV2.systemPrompt}
+              multiline
+              numberOfLines={4}
+              onChangeText={v => onChangeV2({systemPrompt: v})}
+            />
+            <Text style={s.hint}>
+              Instruções base que definem o comportamento do assistant.
+              Aplicadas ao início de toda conversa.
+            </Text>
+
+            {/* Sub-seção: Tema da Interface */}
+            <Text style={s.subSectionTitle}>Tema da Interface</Text>
+            <View style={{flexDirection: 'row', gap: 8, marginBottom: 6}}>
+              <TouchableOpacity
+                style={[
+                  s.themeOption,
+                  settingsV2.theme === 'dark' && s.themeOptionActive,
+                ]}
+                onPress={() => onChangeV2({theme: 'dark'})}>
+                <Icon
+                  name="dark-mode"
+                  size={20}
+                  color={
+                    settingsV2.theme === 'dark'
+                      ? theme.accent
+                      : theme.textSecondary
+                  }
+                />
+                <Text
+                  style={[
+                    s.themeOptionLabel,
+                    settingsV2.theme === 'dark' && s.themeOptionLabelActive,
+                  ]}>
+                  Escuro
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  s.themeOption,
+                  settingsV2.theme === 'light' && s.themeOptionActive,
+                ]}
+                onPress={() => onChangeV2({theme: 'light'})}>
+                <Icon
+                  name="light-mode"
+                  size={20}
+                  color={
+                    settingsV2.theme === 'light'
+                      ? theme.accent
+                      : theme.textSecondary
+                  }
+                />
+                <Text
+                  style={[
+                    s.themeOptionLabel,
+                    settingsV2.theme === 'light' && s.themeOptionLabelActive,
+                  ]}>
+                  Claro
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Sub-seção: Streaming de Respostas */}
+            <Text style={s.subSectionTitle}>Streaming de Respostas</Text>
+            <TouchableOpacity
+              style={s.toggleRow}
+              onPress={() =>
+                onChangeV2({streamingEnabled: !settingsV2.streamingEnabled})
+              }>
+              <Text style={s.toggleLabel}>
+                Receber respostas em tempo real
+              </Text>
+              <Icon
+                name={streamingCheckboxIcon(settingsV2.streamingEnabled === true)}
+                size={24}
+                color={
+                  settingsV2.streamingEnabled === true
+                    ? '#3fb950'
+                    : theme.textSecondary
+                }
+              />
+            </TouchableOpacity>
+            <Text style={s.hint}>
+              Quando ativo, os tokens aparecem conforme chegam (SSE). Desative
+              se seu servidor não suporta streaming ou prefere aguardar a
+              resposta completa de uma vez.
+            </Text>
+          </Card>
+        </ScrollView>
+      </SafeAreaView>
     </View>
   );
 }
 
 function getStyles(t: ThemeColors) {
   return StyleSheet.create({
-  // Overlay absolute fullscreen — cobre o ChatScreen por baixo (que continua
-  // montado, preservando o estado). Animação de entrada pode ser adicionada
-  // depois via Animated.
-  overlay: {
-    position: 'absolute',
-    top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: t.bg,
-    zIndex: 10,
-  },
-  safe: {
-    flex: 1,
-    backgroundColor: t.bg,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: t.border,
-    backgroundColor: t.bg,
-  },
-  backBtn: {
-    padding: 8,
-    marginRight: 8,
-  },
-  headerTitle: {
-    color: t.text,
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  container: {padding: 16, paddingBottom: 60, gap: 14},
-  /* Card — container que agrupa uma seção (item 6) */
-  card: {
-    backgroundColor: t.bgSurface,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: t.border,
-    padding: 16,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 0,
-  },
-  cardChevron: {
-    marginLeft: 'auto',
-  },
-  cardBody: {
-    marginTop: 12,
-  },
-  subSectionTitle: {
-    color: t.text,
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 14,
-    marginBottom: 6,
-  },
-  cardTitle: {
-    color: t.text,
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  row: {flexDirection: 'row', gap: 8, marginBottom: 4},
-  tab: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 14,
-    borderRadius: 10,
-    backgroundColor: t.bg,
-  },
-  tabActive: {backgroundColor: t.userBubble},
-  tabText: {color: t.textSecondary, fontWeight: '600', fontSize: 14},
-  tabTextActive: {color: t.accentText},
-  label: {fontSize: 13, color: t.textSecondary, marginBottom: 6, marginTop: 14},
-  /* Dropdown de servidor */
-  dropdownBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: t.bg,
-    borderRadius: 10,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: t.border,
-  },
-  dropdownBtnText: {
-    flex: 1,
-    color: t.text,
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  dropdownList: {
-    marginTop: 4,
-    backgroundColor: t.bg,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: t.border,
-    overflow: 'hidden',
-  },
-  dropdownItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: t.bgSurface,
-  },
-  dropdownItemActive: {
-    backgroundColor: t.bgSurface,
-  },
-  dropdownItemText: {
-    flex: 1,
-    color: t.text,
-    fontSize: 14,
-  },
-  dropdownItemTextActive: {
-    color: t.accent,
-    fontWeight: '600',
-  },
-  urlDisplay: {
-    fontSize: 11,
-    color: t.textMuted,
-    marginTop: 6,
-    fontFamily: 'monospace',
-  },
-  input: {
-    backgroundColor: t.bg,
-    color: t.text,
-    borderRadius: 10,
-    padding: 14,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: t.border,
-  },
-  textarea: {minHeight: 96, textAlignVertical: 'top'},
-  hint: {fontSize: 12, color: t.textSecondary, marginTop: 6},
-  modelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  modelInput: {flex: 1},
-  fetchBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 10,
-    backgroundColor: '#238636',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  toggleLabel: {color: t.text, fontSize: 15, flex: 1, paddingRight: 12},
-  /* Theme selector options */
-  themeOption: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: t.bg,
-    borderWidth: 1,
-    borderColor: t.border,
-  },
-  themeOptionActive: {
-    borderColor: t.accent,
-    backgroundColor: t.bgSurface,
-  },
-  themeOptionLabel: {
-    color: t.textSecondary,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  themeOptionLabelActive: {
-    color: t.accent,
-  },
-  /* Modal */
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  modalCard: {
-    width: '100%',
-    backgroundColor: t.bgSurface,
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: t.border,
-  },
-  modalTitle: {
-    color: t.text,
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 12,
-    flex: 1,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  filterRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 12,
-    flexWrap: 'wrap',
-  },
-  filterBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: t.bg,
-    borderWidth: 1,
-    borderColor: t.border,
-  },
-  filterBtnActive: {
-    backgroundColor: t.userBubble,
-    borderColor: t.userBubble,
-  },
-  filterBtnFreeActive: {
-    backgroundColor: '#238636',
-    borderColor: '#238636',
-  },
-  filterBtnSttActive: {
-    backgroundColor: '#bc4c00',
-    borderColor: '#bc4c00',
-  },
-  filterBtnTtsActive: {
-    backgroundColor: '#0d9488',
-    borderColor: '#0d9488',
-  },
-  filterBtnText: {
-    color: t.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  filterBtnTextActive: {
-    color: t.accentText,
-  },
-  freeBadge: {
-    backgroundColor: '#238636',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  freeBadgeText: {
-    color: t.accentText,
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  visionBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#2d1b69',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    gap: 3,
-    borderWidth: 1,
-    borderColor: '#6e40c9',
-  },
-  visionBadgeText: {
-    color: '#d2a8ff',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  sttBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#3d1f00',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    gap: 3,
-    borderWidth: 1,
-    borderColor: '#bc4c00',
-  },
-  sttBadgeText: {
-    color: '#f0883e',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  ttsBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#042f2e',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    gap: 3,
-    borderWidth: 1,
-    borderColor: '#0d9488',
-  },
-  ttsBadgeText: {
-    color: '#2dd4bf',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  anyBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#2d1b69',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    gap: 3,
-    borderWidth: 1,
-    borderColor: '#8957e5',
-  },
-  anyBadgeText: {
-    color: '#d2a8ff',
-    fontSize: 9,
-    fontWeight: '700',
-  },
-  emptyText: {
-    color: t.textSecondary,
-    fontSize: 14,
-    textAlign: 'center',
-    paddingVertical: 24,
-  },
-  modelItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: t.border,
-  },
-  modelItemText: {
-    flex: 1,
-    color: t.text,
-    fontSize: 15,
-  },
-  modalCloseBtn: {
-    marginTop: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  modalCloseText: {
-    color: t.accent,
-    fontWeight: '600',
-    fontSize: 15,
-  },
-  sttModelSelected: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    backgroundColor: '#3d1f00',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#bc4c00',
-  },
-  sttModelSelectedText: {
-    color: '#f0883e',
-    fontSize: 13,
-    fontWeight: '600',
-    flex: 1,
-  },
-});
+    // Overlay absolute fullscreen — cobre o ChatScreen por baixo (que continua
+    // montado, preservando o estado). Animação de entrada pode ser adicionada
+    // depois via Animated.
+    overlay: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: t.bg,
+      zIndex: 10,
+    },
+    safe: {
+      flex: 1,
+      backgroundColor: t.bg,
+    },
+    header: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: t.border,
+      backgroundColor: t.bg,
+    },
+    backBtn: {
+      padding: 8,
+      marginRight: 8,
+    },
+    headerTitle: {
+      color: t.text,
+      fontSize: 20,
+      fontWeight: '700',
+    },
+    container: {padding: 16, paddingBottom: 60, gap: 14},
+    /* Card — container que agrupa uma seção (item 6) */
+    card: {
+      backgroundColor: t.bgSurface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: t.border,
+      padding: 16,
+    },
+    cardHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 0,
+    },
+    cardChevron: {
+      marginLeft: 'auto',
+    },
+    cardBody: {
+      marginTop: 12,
+    },
+    subSectionTitle: {
+      color: t.text,
+      fontSize: 14,
+      fontWeight: '700',
+      marginTop: 14,
+      marginBottom: 6,
+    },
+    cardTitle: {
+      color: t.text,
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    row: {flexDirection: 'row', gap: 8, marginBottom: 4},
+    tab: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 14,
+      borderRadius: 10,
+      backgroundColor: t.bg,
+    },
+    tabActive: {backgroundColor: t.userBubble},
+    tabText: {color: t.textSecondary, fontWeight: '600', fontSize: 14},
+    tabTextActive: {color: t.accentText},
+    label: {fontSize: 13, color: t.textSecondary, marginBottom: 6, marginTop: 14},
+    /* Dropdown de servidor */
+    dropdownBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: t.bg,
+      borderRadius: 10,
+      padding: 14,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    dropdownBtnText: {
+      flex: 1,
+      color: t.text,
+      fontSize: 15,
+      fontWeight: '600',
+    },
+    dropdownList: {
+      marginTop: 4,
+      backgroundColor: t.bg,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: t.border,
+      overflow: 'hidden',
+    },
+    dropdownItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingVertical: 12,
+      paddingHorizontal: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: t.bgSurface,
+    },
+    dropdownItemActive: {
+      backgroundColor: t.bgSurface,
+    },
+    dropdownItemText: {
+      flex: 1,
+      color: t.text,
+      fontSize: 14,
+    },
+    dropdownItemTextActive: {
+      color: t.accent,
+      fontWeight: '600',
+    },
+    urlDisplay: {
+      fontSize: 11,
+      color: t.textMuted,
+      marginTop: 6,
+      fontFamily: 'monospace',
+    },
+    input: {
+      backgroundColor: t.bg,
+      color: t.text,
+      borderRadius: 10,
+      padding: 14,
+      fontSize: 15,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    textarea: {minHeight: 96, textAlignVertical: 'top'},
+    hint: {fontSize: 12, color: t.textSecondary, marginTop: 6},
+    modelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    modelInput: {flex: 1},
+    fetchBtn: {
+      width: 48,
+      height: 48,
+      borderRadius: 10,
+      backgroundColor: '#238636',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    toggleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingVertical: 4,
+    },
+    toggleLabel: {color: t.text, fontSize: 15, flex: 1, paddingRight: 12},
+    /* Theme selector options */
+    themeOption: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 12,
+      borderRadius: 10,
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    themeOptionActive: {
+      borderColor: t.accent,
+      backgroundColor: t.bgSurface,
+    },
+    themeOptionLabel: {
+      color: t.textSecondary,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    themeOptionLabelActive: {
+      color: t.accent,
+    },
+    /* Modal */
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.7)',
+      justifyContent: 'center',
+      alignItems: 'center',
+      padding: 24,
+    },
+    modalCard: {
+      width: '100%',
+      backgroundColor: t.bgSurface,
+      borderRadius: 12,
+      padding: 16,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    modalTitle: {
+      color: t.text,
+      fontSize: 18,
+      fontWeight: '700',
+      marginBottom: 12,
+      flex: 1,
+    },
+    modalHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 4,
+    },
+    filterRow: {
+      flexDirection: 'row',
+      gap: 6,
+      marginBottom: 12,
+      flexWrap: 'wrap',
+    },
+    filterBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 16,
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    filterBtnActive: {
+      backgroundColor: t.userBubble,
+      borderColor: t.userBubble,
+    },
+    filterBtnFreeActive: {
+      backgroundColor: '#238636',
+      borderColor: '#238636',
+    },
+    filterBtnSttActive: {
+      backgroundColor: '#bc4c00',
+      borderColor: '#bc4c00',
+    },
+    filterBtnTtsActive: {
+      backgroundColor: '#0d9488',
+      borderColor: '#0d9488',
+    },
+    filterBtnText: {
+      color: t.textSecondary,
+      fontSize: 12,
+      fontWeight: '600',
+    },
+    filterBtnTextActive: {
+      color: t.accentText,
+    },
+    freeBadge: {
+      backgroundColor: '#238636',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+    },
+    freeBadgeText: {
+      color: t.accentText,
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    visionBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#2d1b69',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      gap: 3,
+      borderWidth: 1,
+      borderColor: '#6e40c9',
+    },
+    visionBadgeText: {
+      color: '#d2a8ff',
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    sttBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#3d1f00',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      gap: 3,
+      borderWidth: 1,
+      borderColor: '#bc4c00',
+    },
+    sttBadgeText: {
+      color: '#f0883e',
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    ttsBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#042f2e',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      gap: 3,
+      borderWidth: 1,
+      borderColor: '#0d9488',
+    },
+    ttsBadgeText: {
+      color: '#2dd4bf',
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    anyBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#2d1b69',
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      gap: 3,
+      borderWidth: 1,
+      borderColor: '#8957e5',
+    },
+    anyBadgeText: {
+      color: '#d2a8ff',
+      fontSize: 9,
+      fontWeight: '700',
+    },
+    emptyText: {
+      color: t.textSecondary,
+      fontSize: 14,
+      textAlign: 'center',
+      paddingVertical: 24,
+    },
+    modelItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingVertical: 12,
+      borderBottomWidth: 1,
+      borderBottomColor: t.border,
+    },
+    modelItemText: {
+      flex: 1,
+      color: t.text,
+      fontSize: 15,
+    },
+    modalCloseBtn: {
+      marginTop: 12,
+      paddingVertical: 12,
+      alignItems: 'center',
+    },
+    modalCloseText: {
+      color: t.accent,
+      fontWeight: '600',
+      fontSize: 15,
+    },
+    sttModelSelected: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginTop: 8,
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      backgroundColor: '#3d1f00',
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: '#bc4c00',
+    },
+    sttModelSelectedText: {
+      color: '#f0883e',
+      fontSize: 13,
+      fontWeight: '600',
+      flex: 1,
+    },
+    /* --- Servidores card --- */
+    serverItem: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingVertical: 12,
+      paddingHorizontal: 14,
+      borderBottomWidth: 1,
+      borderBottomColor: t.border,
+    },
+    serverItemActive: {
+      backgroundColor: t.bgElevated,
+    },
+    serverItemInfo: {
+      flex: 1,
+      flexDirection: 'column',
+    },
+    serverItemName: {
+      color: t.text,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    serverItemNameActive: {
+      color: t.accent,
+    },
+    serverItemUrl: {
+      color: t.textMuted,
+      fontSize: 11,
+      fontFamily: 'monospace',
+      marginTop: 2,
+    },
+    serverDeleteBtn: {
+      padding: 6,
+      marginLeft: 4,
+    },
+    formatBadge: {
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+    },
+    formatBadgeText: {
+      color: t.accentText,
+      fontSize: 10,
+      fontWeight: '700',
+    },
+    addServerBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: 12,
+      borderRadius: 10,
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.accent,
+      marginTop: 8,
+      borderStyle: 'dashed',
+    },
+    addServerBtnText: {
+      color: t.accent,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+  });
 }
