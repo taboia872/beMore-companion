@@ -1,9 +1,11 @@
 import React, {useState, useEffect, useCallback} from 'react';
 import {StatusBar, View, BackHandler} from 'react-native';
-import {AppSettings, Message} from './types';
-import {loadSettings} from './data/appSettings';
+import {AppSettings, AppSettingsV2, Message} from './types';
+import {loadSettings, loadSettingsV2, migrateToV2} from './data/appSettings';
+import {getAllServers} from './data/serverDb';
 import {ChatScreen} from './screens/ChatScreen';
 import {SettingsScreen} from './screens/SettingsScreen';
+import {OnboardingScreen} from './screens/OnboardingScreen';
 import {getTheme} from './utils/theme';
 
 export default function App() {
@@ -14,10 +16,26 @@ export default function App() {
   // resetando pra mic quando volto do settings").
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [settingsV2, setSettingsV2] = useState<AppSettingsV2 | null>(null);
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
 
   useEffect(() => {
-    loadSettings().then(setSettings);
+    (async () => {
+      // Tenta migrar settings legado → V2 (roda uma vez, idempotente)
+      const v2 = await migrateToV2();
+      setSettingsV2(v2);
+
+      // Carrega settings legado (ainda usado por ChatScreen/SettingsScreen)
+      const legacy = await loadSettings();
+      setSettings(legacy);
+
+      // Verifica se precisa onboarding: não migrou OU não tem servidores
+      const servers = getAllServers();
+      if (!v2.migrated || servers.length === 0) {
+        setNeedsOnboarding(true);
+      }
+    })();
   }, []);
 
   // Intercepta o botão "Voltar" físico do Android: se settings aberto, fecha
@@ -41,6 +59,21 @@ export default function App() {
     },
     [],
   );
+
+  // Onboarding: primeira abertura sem servidores
+  if (needsOnboarding) {
+    return (
+      <OnboardingScreen
+        onConclude={() => {
+          setNeedsOnboarding(false);
+          // Recarrega settings após onboarding
+          const v2 = loadSettingsV2();
+          setSettingsV2(v2);
+          loadSettings().then(setSettings);
+        }}
+      />
+    );
+  }
 
   if (!settings) {
     return <View style={{flex: 1, backgroundColor: '#0d1117'}} />;
