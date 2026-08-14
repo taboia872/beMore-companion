@@ -1046,13 +1046,34 @@ O `ServerService` já tem `buildImageGenUrl()` e `buildImageGenPayload()` que re
 
 O `ImageGenService` (a criar) faz o request, recebe base64 ou URL, e retorna um objeto de imagem que o ChatScreen renderiza como bubble.
 
-### 12.3 Próximos passos (depois do Phase 3 atual)
+### 12.3 Padrão "Two-Step Generation" (decisão confirmada)
 
-1. Criar `ImageGenService.ts` — usa `buildImageGenUrl` + `buildImageGenPayload` do ServerService
-2. Adicionar campo `activeImageGenModelId` relevante no SettingsScreen (já existe no tipo `AppSettingsV2`)
+> Decisão confirmada por Juliano (13/ago/2026).
+
+Para QUALQUER geração multimídia (imagem, áudio, vídeo futuro), o app sempre faz **dois passos**:
+
+1. **Chat LLM gera o prompt contextualizado** — O histórico do chat + o pedido do usuário vai pro modelo de chat ativo com uma instrução escondida:
+
+   > *"Resuma em inglês um prompt detalhado para gerar [imagem/áudio/vídeo] que ilustre o que o usuário está pedindo. Use o contexto da conversa. Responda só o prompt, nada mais."*
+
+2. **Serviço específico executa** — O prompt refinado vai pro serviço apropriado:
+   - Image gen: `ImageGenService` → modelo com `isImageGen` → imagem
+   - TTS: `TtsService` → modelo com `isTts` → áudio
+   - Video gen (futuro): `VideoGenService` → modelo com `isVideoGen` → vídeo
+
+O usuário não precisa descrever do zero — o app usa o contexto da conversa para construir o prompt automaticamente. Isso é a essência do orquestrador.
+
+**Custo:** Uma chamada extra de chat (~30 tokens de output) — rápida e barata.
+**Benefício:** Qualidade drasticamente superior — a imagem/áudio reflete o contexto da conversa.
+
+### 12.4 Próximos passos (depois do Phase 3 atual)
+
+1. Criar `ImageGenService.ts` — usa `buildImageGenUrl` + `buildImageGenPayload` do ServerService + two-step generation
+2. Adicionar campo `activeImageGenModelId` no SettingsScreen (já existe no tipo `AppSettingsV2`)
 3. Adicionar botão de image no input bar do ChatScreen (ícone `image`)
 4. Renderizar imagem gerada como bubble do assistant
 5. Permitir que o usuário faça perguntas sobre a imagem gerada (visão) — o modelo de chat ativo recebe a imagem como `image_url` no content
+6. Mesmo padrão two-step para TTS contextualizado (futuro) e video gen (futuro)
 - **Custom paths para formato 'custom':** Hoje usa paths OpenAI padrão. Se precisar
   de paths diferentes (ex: Azure OpenAI tem URLs diferentes), adicionar campos
   `chatPath` e `modelsPath` no `ServerEntry`. (futuro, se需求 surgir)
