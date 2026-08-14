@@ -325,7 +325,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
           <Card
             title="Servidores"
             icon="dns"
-            defaultExpanded={true}
+            defaultExpanded={false}
             theme={theme}>
             {allServers.length === 0 ? (
               <>
@@ -430,7 +430,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
           <Card
             title="Modelo de Linguagem"
             icon="memory"
-            defaultExpanded={true}
+            defaultExpanded={false}
             theme={theme}>
             {/* Dropdown de servidor ativo */}
             <Text style={s.label}>Servidor ativo</Text>

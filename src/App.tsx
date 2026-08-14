@@ -80,15 +80,23 @@ export default function App() {
     model: ModelEntry | null,
     key?: string,
   ): AppSettings => {
+    // Resolve STT override: modelo e servidor
+    const sttModel = v2.activeSttModelId ? getModel(v2.activeSttModelId) : null;
+    const sttServer = v2.sttServerId ? getServer(v2.sttServerId) : null;
+
+    // Resolve TTS override: modelo e servidor
+    const ttsModel = v2.activeTtsModelId ? getModel(v2.activeTtsModelId) : null;
+    const ttsServer = v2.ttsServerId ? getServer(v2.ttsServerId) : null;
+
     return {
       systemPrompt: v2.systemPrompt,
       theme: v2.theme,
       sttMode: v2.sttMode,
       sttModelPath: v2.sttModelPath,
-      sttOnlineModel: '',  // virá do activeSttModelId quando implementado
-      sttServerOverride: '',  // virá do sttServerId
-      ttsOnlineModel: '',  // virá do activeTtsModelId
-      ttsServerOverride: '',  // virá do ttsServerId
+      sttOnlineModel: sttModel?.modelId ?? '',
+      sttServerOverride: sttServer?.baseUrl ?? '',
+      ttsOnlineModel: ttsModel?.modelId ?? '',
+      ttsServerOverride: ttsServer?.baseUrl ?? '',
       ttsVoice: v2.ttsVoice,
       ttsAutoPlay: v2.ttsAutoPlay,
       streamingEnabled: v2.streamingEnabled,
