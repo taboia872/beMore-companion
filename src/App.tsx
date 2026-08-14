@@ -17,6 +17,7 @@ export default function App() {
   // o Chat e destruia esse estado a cada troca de aba (bug do "botão de enviar
   // resetando pra mic quando volto do settings").
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [addServerMode, setAddServerMode] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [settingsV2, setSettingsV2] = useState<AppSettingsV2 | null>(null);
   const [needsOnboarding, setNeedsOnboarding] = useState(false);
@@ -40,7 +41,10 @@ export default function App() {
       }
 
       // resolve servidor e modelo ativos do V2
-      const {server, model, apiKey: key} = await resolveActiveFromV2(v2);
+      const resolved = await resolveActiveFromV2(v2);
+      const server = resolved.server;
+      const model = resolved.model;
+      const key = resolved.apiKey;
 
       // Carrega settings legado (ainda usado por ChatScreen/SettingsScreen)
       // construído a partir do V2 (ponte de compatibilidade)
@@ -140,8 +144,8 @@ export default function App() {
           // Recarrega settings V2 + resolve ativos
           const v2 = loadSettingsV2();
           setSettingsV2(v2);
-          resolveActiveFromV2(v2).then(({server, model, apiKey: key}) => {
-            const legacy = buildLegacyFromV2(v2, server, model, key);
+          resolveActiveFromV2(v2).then((resolved) => {
+            const legacy = buildLegacyFromV2(v2, resolved.server, resolved.model, resolved.apiKey);
             setSettings(legacy);
           });
         }}
@@ -200,8 +204,31 @@ export default function App() {
             // Após fechar settings, recarrega V2 e reconstrói legacy
             const v2 = loadSettingsV2();
             setSettingsV2(v2);
-            resolveActiveFromV2(v2).then(({server, model, apiKey: key}) => {
-              const legacy = buildLegacyFromV2(v2, server, model, key);
+            resolveActiveFromV2(v2).then((resolved) => {
+              const legacy = buildLegacyFromV2(v2, resolved.server, resolved.model, resolved.apiKey);
+              setSettings(legacy);
+            });
+          }}
+          onAddServer={() => {
+            // Fecha settings e monta OnboardingScreen por cima (modo add-server)
+            setSettingsOpen(false);
+            setAddServerMode(true);
+          }}
+        />
+      )}
+      {/* OnboardingScreen em modo adicionar servidor — montado por cima
+          quando o usuario toca em Adicionar servidor no SettingsScreen.
+          Mesma tela do onboarding inicial, mas so para adicionar um novo
+          servidor + modelos. Ao concluir, recarrega V2 e fecha. */}
+      {addServerMode && (
+        <OnboardingScreen
+          onConclude={() => {
+            setAddServerMode(false);
+            // Recarrega V2 + resolve ativos (mesmo fluxo do onboarding inicial)
+            const v2 = loadSettingsV2();
+            setSettingsV2(v2);
+            resolveActiveFromV2(v2).then((resolved) => {
+              const legacy = buildLegacyFromV2(v2, resolved.server, resolved.model, resolved.apiKey);
               setSettings(legacy);
             });
           }}

@@ -24,6 +24,7 @@ import {
   getModelsByServer,
   getAllModels,
   getModel,
+  patchModel,
 } from '../data/modelDb';
 import {loadSettingsV2, patchSettingsV2} from '../data/appSettings';
 import {shortModelName, displayModelName} from '../utils/modelName';
@@ -44,6 +45,8 @@ interface Props {
   settingsV2: AppSettingsV2;
   onChangeV2: (patch: Partial<AppSettingsV2>) => void;
   onClose: () => void;
+  /** dispara o fluxo de adicionar servidor (monta OnboardingScreen por cima) */
+  onAddServer: () => void;
 }
 
 interface CardProps {
@@ -147,7 +150,7 @@ function renderAllBadges(
   );
 }
 
-export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
+export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: Props) {
   const theme = getTheme(settingsV2.theme);
   const s = getStyles(theme);
 
@@ -158,6 +161,11 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
 
   // Estado de loading p/ delete de servidor
   const [deleting, setDeleting] = useState(false);
+
+  // Estado p/ forçar re-render após toggle de favorito (MMKV é síncrono,
+  // mas não dispara re-render automaticamente)
+  const [, setFavTick] = useState(0);
+  const refreshFav = () => setFavTick(t => t + 1);
 
   // --- Dados (síncronos, MMKV) ---
 
@@ -224,6 +232,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
   const selectTtsServer = (serverId: string | null) => {
     setTtsServerDropdownOpen(false);
     onChangeV2({ttsServerId: serverId});
+  };
+
+  /** Alterna favorito de um modelo (LLM, STT, TTS). */
+  const toggleFavorite = (model: ModelEntry) => {
+    patchModel(model.id, {isFavorite: !model.isFavorite});
+    refreshFav();
   };
 
   const handleDeleteServer = (server: ServerEntry) => {
@@ -335,12 +349,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                 </Text>
                 <TouchableOpacity
                   style={s.addServerBtn}
-                  onPress={() =>
-                    Alert.alert(
-                      'Adicionar servidor',
-                      'Use o onboarding para adicionar servidores.',
-                    )
-                  }>
+                  onPress={onAddServer}>
                   <Icon name="add" size={20} color={theme.accentText} />
                   <Text style={s.addServerBtnText}>Adicionar servidor</Text>
                 </TouchableOpacity>
@@ -411,12 +420,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                 {/* Botão adicionar servidor */}
                 <TouchableOpacity
                   style={s.addServerBtn}
-                  onPress={() =>
-                    Alert.alert(
-                      'Adicionar servidor',
-                      'Use o onboarding para adicionar servidores.',
-                    )
-                  }>
+                  onPress={onAddServer}>
                   <Icon name="add" size={20} color={theme.accentText} />
                   <Text style={s.addServerBtnText}>Adicionar servidor</Text>
                 </TouchableOpacity>
@@ -519,9 +523,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                       ]}
                       onPress={() => selectModel(model)}>
                       <Icon
-                        name={model.isFavorite ? 'star' : 'memory'}
+                        name="memory"
                         size={18}
-                        color={isActive ? theme.accent : model.isFavorite ? '#e3b341' : theme.textSecondary}
+                        color={isActive ? theme.accent : theme.textSecondary}
                       />
                       <View style={{flex: 1}}>
                         <Text
@@ -548,6 +552,17 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                           )}
                         </View>
                       </View>
+                      {/* Toggle favorito */}
+                      <TouchableOpacity
+                        onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                        style={s.favBtn}>
+                        <Icon
+                          name={model.isFavorite ? 'star' : 'star-border'}
+                          size={20}
+                          color={model.isFavorite ? '#e3b341' : theme.textMuted}
+                        />
+                      </TouchableOpacity>
                       {isActive && (
                         <Icon name="check" size={18} color="#3fb950" />
                       )}
@@ -753,15 +768,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                           ]}
                           onPress={() => selectSttModel(model)}>
                           <Icon
-                            name={model.isFavorite ? 'star' : 'mic'}
+                            name="mic"
                             size={18}
-                            color={
-                              isActive
-                                ? theme.accent
-                                : model.isFavorite
-                                ? '#e3b341'
-                                : theme.textSecondary
-                            }
+                            color={isActive ? theme.accent : theme.textSecondary}
                           />
                           <View style={{flex: 1}}>
                             <Text
@@ -788,6 +797,17 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                               )}
                             </View>
                           </View>
+                          {/* Toggle favorito */}
+                          <TouchableOpacity
+                            onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
+                            hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                            style={s.favBtn}>
+                            <Icon
+                              name={model.isFavorite ? 'star' : 'star-border'}
+                              size={20}
+                              color={model.isFavorite ? '#e3b341' : theme.textMuted}
+                            />
+                          </TouchableOpacity>
                           {isActive && (
                             <Icon name="check" size={18} color="#3fb950" />
                           )}
@@ -918,15 +938,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                       ]}
                       onPress={() => selectTtsModel(model)}>
                       <Icon
-                        name={model.isFavorite ? 'star' : 'volume-up'}
+                        name="volume-up"
                         size={18}
-                        color={
-                          isActive
-                            ? theme.accent
-                            : model.isFavorite
-                            ? '#e3b341'
-                            : theme.textSecondary
-                        }
+                        color={isActive ? theme.accent : theme.textSecondary}
                       />
                       <View style={{flex: 1}}>
                         <Text
@@ -953,6 +967,17 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose}: Props) {
                           )}
                         </View>
                       </View>
+                      {/* Toggle favorito */}
+                      <TouchableOpacity
+                        onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                        style={s.favBtn}>
+                        <Icon
+                          name={model.isFavorite ? 'star' : 'star-border'}
+                          size={20}
+                          color={model.isFavorite ? '#e3b341' : theme.textMuted}
+                        />
+                      </TouchableOpacity>
                       {isActive && (
                         <Icon name="check" size={18} color="#3fb950" />
                       )}
@@ -1539,6 +1564,10 @@ function getStyles(t: ThemeColors) {
       color: t.accent,
       fontSize: 14,
       fontWeight: '600',
+    },
+    favBtn: {
+      padding: 4,
+      marginLeft: 4,
     },
   });
 }
