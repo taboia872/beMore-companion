@@ -987,6 +987,72 @@ Não precisa de SQLite, WatermelonDB, ou Realm para este escopo.
 - **Chats persistidos:** Salvar histórico de conversas no MMKV ou SQLite? (futuro)
 - **Sync entre dispositivos:** Export/import de configuração via JSON? (futuro)
 - **Compartilhar servidores:** QR code ou link compartilhável? (futuro)
+
+---
+
+## 12. Visão: App como Orquestrador (13/ago/2026)
+
+> Decisão registrada por Juliano — visão de longo prazo do aplicativo.
+
+### 12.1 Conceito
+
+O BeMore-Companion não é apenas um chat LLM — é um **orquestrador de IA**. O usuário cadastra os serviços (URLs + API keys), o app faz fetch dos modelos disponíveis, e num **único chat** o usuário pode:
+
+- Conversar por texto com qualquer modelo de chat
+- Enviar imagens para análise (visão)
+- Pedir geração de imagens
+- Usar STT (transcrição de voz → texto)
+- Usar TTS (texto → voz)
+- Tudo no mesmo fluxo de conversa, sem trocar de tela
+
+O app **resolve automaticamente** para onde enviar cada tipo de request: texto vai pro modelo de chat ativo, imagem para gerar vai pro modelo de image gen ativo, áudio para transcrever vai pro modelo STT ativo, etc. O usuário não precisa pensar em "qual servidor fazer isso" — ele só conversa.
+
+### 12.2 Image Gen no Chat — Decisão de Arquitetura
+
+**Decisão: image gen INLINE no chat existente.** Não criar um novo chat para gerar imagens.
+
+#### Como funciona
+
+1. Usuário pede "gera uma imagem de um gato" no chat
+2. O app detecta que a intenção é gerar imagem (como?)
+   - **Opção A — Explícita:** Usuário toca num botão "image" no input bar (igual o botão de anexar imagem hoje). Abre um prompt mode onde o que ele digita vai como prompt pra image gen, não pro LLM de chat.
+   - **Opção B — Roteamento por modelo:** Se o modelo ativo for um modelo de image gen (tem `isImageGen: true`), o request automaticamente usa o endpoint de image gen em vez de chat completions.
+   - **Opção C — Roteamento por intenção (LLM router):** O modelo de chat detecta que o usuário quer uma imagem e responde com um comando especial (ex: `[IMAGE_GEN: prompt]`) que o app intercepta e envia pro image gen. Mais complexo, mas mais natural.
+
+3. A imagem resultante é renderizada como uma mensagem do assistant no chat (bubble com imagem em vez de texto)
+4. Continua a conversa normalmente — o usuário pode pedir alterações, fazer perguntas sobre a imagem (visão), etc.
+
+#### Trade-offs
+
+| Abordagem | Pró | Contra |
+|---|---|---|
+| **A — Botão explícito** | Simples, controlável, same UX do anexo de imagem | Usuário precisa saber que tem que tocar o botão |
+| **B — Roteamento por modelo** | Natural — selecionou modelo de imagem, tudo é imagem | Não permite misturar chat + image gen no mesmo chat |
+| **C — LLM router** | Mais natural, hands-off | Complexo, latência extra, pode errar a detecção |
+
+#### Recomendação (proposta)
+
+**Abordagem A + B combinadas:**
+- Se o `activeModelId` tem `isImageGen: true` → todo request vai pro endpoint de image gen (B)
+- Se o `activeModelId` é um modelo de chat normal → botão "image" no input bar permite enviar um prompt diretamente pro `activeImageGenModelId` (A), que pode ser de outro servidor
+- As duas coexistem: o usuário pode estar num chat com Groq (texto) e pedir uma imagem que vai pro Pollinations ou Gemini
+
+#### Endpoint de image gen
+
+O `ServerService` já tem `buildImageGenUrl()` e `buildImageGenPayload()` que respeitam o formato do servidor:
+- **OpenAI-compat:** `POST /images/generations` com `{model, prompt, n, size, response_format}`
+- **Gemini:** `POST /models/{model}:generateContent` com `responseModalities: ["IMAGE"]`
+- **Pollinations:** `GET /prompt/{encoded_prompt}` — sem POST, sem API key
+
+O `ImageGenService` (a criar) faz o request, recebe base64 ou URL, e retorna um objeto de imagem que o ChatScreen renderiza como bubble.
+
+### 12.3 Próximos passos (depois do Phase 3 atual)
+
+1. Criar `ImageGenService.ts` — usa `buildImageGenUrl` + `buildImageGenPayload` do ServerService
+2. Adicionar campo `activeImageGenModelId` relevante no SettingsScreen (já existe no tipo `AppSettingsV2`)
+3. Adicionar botão de image no input bar do ChatScreen (ícone `image`)
+4. Renderizar imagem gerada como bubble do assistant
+5. Permitir que o usuário faça perguntas sobre a imagem gerada (visão) — o modelo de chat ativo recebe a imagem como `image_url` no content
 - **Custom paths para formato 'custom':** Hoje usa paths OpenAI padrão. Se precisar
   de paths diferentes (ex: Azure OpenAI tem URLs diferentes), adicionar campos
   `chatPath` e `modelsPath` no `ServerEntry`. (futuro, se需求 surgir)
