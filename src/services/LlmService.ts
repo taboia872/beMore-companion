@@ -1,5 +1,4 @@
 import {LlmConfig, Message, ContentPart, ServerEntry} from '../types';
-import {buildChatUrl as buildChatUrlV2, buildAuthHeaders} from './ServerService';
 
 /**
  * Eventos de stream emitidos para a UI conforme os tokens chegam.
@@ -385,11 +384,10 @@ function fetchBatch(
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
-    const authHeaders = config.serverFormat
-      ? buildAuthHeaders({format: config.serverFormat} as ServerEntry, config.apiKey)
-      : config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {};
-    for (const [k, v] of Object.entries(authHeaders)) {
-      xhr.setRequestHeader(k, v);
+    // Auth: Bearer para todos os formatos (Gemini usa endpoint OpenAI-compat
+    // que requer Bearer, não x-goog-api-key).
+    if (config.apiKey) {
+      xhr.setRequestHeader('Authorization', `Bearer ${config.apiKey}`);
     }
     xhr.onreadystatechange = () => {
       if (xhr.readyState === 4 && !finished) {
@@ -524,11 +522,12 @@ function streamNetwork(
     xhr.open('POST', url);
     xhr.responseType = 'text';
     xhr.setRequestHeader('Content-Type', 'application/json');
-    const authHeaders = config.serverFormat
-      ? buildAuthHeaders({format: config.serverFormat} as ServerEntry, config.apiKey)
-      : config.apiKey ? {Authorization: `Bearer ${config.apiKey}`} : {};
-    for (const [k, v] of Object.entries(authHeaders)) {
-      xhr.setRequestHeader(k, v);
+    // Auth: Gemini usa endpoint OpenAI-compat (/openai/chat/completions) que
+    // requer Bearer — NÃO x-goog-api-key (esse é só para o endpoint nativo
+    // /models/:generateContent, usado pelo TtsService). Demais formatos
+    // usam Bearer normalmente.
+    if (config.apiKey) {
+      xhr.setRequestHeader('Authorization', `Bearer ${config.apiKey}`);
     }
 
     let consumed = 0; // offset já processado da responseText
@@ -698,9 +697,9 @@ export function abortGeneration(): void {
  * para streamResponse (reutilizando toda a lógica de stream/batch/thinking).
  *
  * O formato do servidor (openai, gemini, ollama, etc) é pasado via
- * config.serverFormat — streamNetwork/fetchBatch usam buildAuthHeaders
- * do ServerService quando serverFormat está presente, garantindo que
- * Gemini use x-goog-api-key em vez de Bearer.
+ * config.serverFormat. Auth é sempre Bearer para o endpoint de chat
+ * (Gemini usa endpoint OpenAI-compat que requer Bearer, não
+ * x-goog-api-key que é só para o endpoint nativo /models/:generateContent).
  */
 export function streamResponseV2(
   messages: Message[],
