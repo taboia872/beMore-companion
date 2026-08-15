@@ -25,7 +25,7 @@ import {
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {Clipboard} from 'react-native';
-import {AppSettings, Message, MessageStatus, ContentPart} from '../types';
+import {AppSettings, AppSettingsV2, Message, MessageStatus, ContentPart} from '../types';
 import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
@@ -34,7 +34,8 @@ import {getTextContent, getImageUrls, hasImages} from '../utils/messageContent';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
 import {speakText, stopSpeaking} from '../services/TtsService';
-import {loadApiKeyForServer} from '../data/appSettings';
+import {getServer} from '../data/serverDb';
+import {loadApiKey} from '../data/keychainDb';
 import {getTheme} from '../utils/theme';
 import type {ThemeColors} from '../utils/theme';
 
@@ -182,12 +183,13 @@ function AnimatedBubble({children, delay = 0}: {children: React.ReactNode; delay
 
 interface Props {
   settings: AppSettings;
+  settingsV2: AppSettingsV2;
   messages: Message[];
   setMessages: (updater: (prev: Message[]) => Message[]) => void;
   onOpenSettings: () => void;
 }
 
-export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Props) {
+export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenSettings}: Props) {
   const theme = getTheme(settings.theme);
   const s = getStyles(theme);
   const mdStyle = getMdStyle(theme);
@@ -733,19 +735,22 @@ export function ChatScreen({settings, messages, setMessages, onOpenSettings}: Pr
       return;
     }
 
-    // Determina baseUrl e apiKey (override ou reutiliza LLM).
-    let baseUrl: string;
-    let apiKey: string;
-    if (settings.ttsServerOverride?.trim()) {
-      baseUrl = settings.ttsServerOverride.trim();
-      apiKey = await loadApiKeyForServer(baseUrl);
-    } else {
-      baseUrl = settings.llm.baseUrl;
-      // Tenta usar a apiKey do settings; se vazia, carrega do Keychain.
+    // Resolve servidor TTS pelo V2: ttsServerId ou activeServerId (fallback).
+    // Carrega baseUrl e apiKey do ServerEntry + Keychain (por serverId).
+    const ttsServerId = settingsV2.ttsServerId ?? settingsV2.activeServerId;
+    const ttsServer = ttsServerId ? getServer(ttsServerId) : null;
+    if (!ttsServer) {
+      Alert.alert('TTS não configurado', 'Selecione um servidor nas configurações.');
+      return;
+    }
+    const baseUrl = ttsServer.baseUrl;
+    let apiKey = '';
+    if (ttsServer.apiKeyCount > 0) {
+      apiKey = await loadApiKey(ttsServer.id, ttsServer.activeKeyIndex);
+    }
+    // Fallback: se o ttsServer e o servidor de chat sao o mesmo, usa a key do settings.
+    if (!apiKey && ttsServerId === settingsV2.activeServerId) {
       apiKey = settings.llm.apiKey ?? '';
-      if (!apiKey) {
-        apiKey = await loadApiKeyForServer(baseUrl);
-      }
     }
 
     setSpeakingId(msg.id ?? null);

@@ -169,6 +169,7 @@ export default function App() {
       {/* Chat SEMPRE montado — estado persiste entre overlay abas. */}
       <ChatScreen
         settings={settings}
+        settingsV2={settingsV2!}
         messages={messages}
         setMessages={updateMessages}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -216,23 +217,23 @@ export default function App() {
           }}
         />
       )}
-      {/* OnboardingScreen em modo adicionar servidor — montado por cima
-          quando o usuario toca em Adicionar servidor no SettingsScreen.
-          Mesma tela do onboarding inicial, mas so para adicionar um novo
-          servidor + modelos. Ao concluir, recarrega V2 e fecha. */}
+      {/* OnboardingScreen em modo adicionar servidor — overlay absolute
+          full-screen por cima de tudo (chat + settings). */}
       {addServerMode && (
-        <OnboardingScreen
-          onConclude={() => {
-            setAddServerMode(false);
-            // Recarrega V2 + resolve ativos (mesmo fluxo do onboarding inicial)
-            const v2 = loadSettingsV2();
-            setSettingsV2(v2);
-            resolveActiveFromV2(v2).then((resolved) => {
-              const legacy = buildLegacyFromV2(v2, resolved.server, resolved.model, resolved.apiKey);
-              setSettings(legacy);
-            });
-          }}
-        />
+        <View style={{position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, zIndex: 100}}>
+          <OnboardingScreen
+            onConclude={() => {
+              setAddServerMode(false);
+              // Recarrega V2 + resolve ativos (mesmo fluxo do onboarding inicial)
+              const v2 = loadSettingsV2();
+              setSettingsV2(v2);
+              resolveActiveFromV2(v2).then((resolved) => {
+                const legacy = buildLegacyFromV2(v2, resolved.server, resolved.model, resolved.apiKey);
+                setSettings(legacy);
+              });
+            }}
+          />
+        </View>
       )}
     </View>
   );
