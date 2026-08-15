@@ -33,7 +33,7 @@ import {displayModelName} from '../utils/modelName';
 import {getTextContent, getImageUrls, hasImages} from '../utils/messageContent';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
-import {speakText, stopSpeaking} from '../services/TtsService';
+import {speakText, stopSpeaking, pauseSpeaking, resumeSpeaking, getTtsState} from '../services/TtsService';
 import {getServer} from '../data/serverDb';
 import {loadApiKey} from '../data/keychainDb';
 import {getTheme} from '../utils/theme';
@@ -214,6 +214,8 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
   const [ttsAuto, setTtsAuto] = useState(settings.ttsAutoPlay ?? false);
   // Id da mensagem sendo sintetizada (para feedback visual no botão).
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  // Se o TTS desta mensagem está pausado (para alternar ícone play/pause).
+  const [ttsPaused, setTtsPaused] = useState(false);
   // Se o usuário está no final da lista (longe do topo = scroll ativo).
   // Usado para: mostrar/esconder botão "rolar para baixo" e decidir
   // se auto-scroll durante streaming é apropriado.
@@ -720,11 +722,26 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
 
   // --- TTS: sintetizar e tocar a mensagem do assistant ---
   const speakMessage = async (msg: Message) => {
-    // Se já está tocando esta mensagem, para.
+    // Se já está tocando esta mensagem:
+    // - Se tocando → pausa
+    // - Se pausada → retoma
+    // - Se quer tocar outra → para a atual e inicia nova
     if (speakingId && speakingId === msg.id) {
+      const ttsState = getTtsState();
+      if (ttsState === 'playing') {
+        pauseSpeaking();
+        setTtsPaused(true);
+        return;
+      }
+      if (ttsState === 'paused') {
+        resumeSpeaking();
+        setTtsPaused(false);
+        return;
+      }
+      // idle (terminou?) — fall through para reiniciar
       stopSpeaking();
       setSpeakingId(null);
-      return;
+      setTtsPaused(false);
     }
     const text = getTextContent(msg);
     if (!text.trim()) return;
@@ -754,6 +771,7 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
     }
 
     setSpeakingId(msg.id ?? null);
+    setTtsPaused(false);
     try {
       await speakText({
         baseUrl,
@@ -766,6 +784,7 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
       Alert.alert('TTS falhou', (e as Error)?.message ?? String(e));
     } finally {
       setSpeakingId(null);
+      setTtsPaused(false);
     }
   };
 
@@ -936,7 +955,11 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
                       onPress={() => speakMessage(item)}
                       hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
                       <Icon
-                        name={speakingId === item.id ? 'stop' : 'volume-up'}
+                        name={
+                          speakingId === item.id
+                            ? (ttsPaused ? 'play-arrow' : 'pause')
+                            : 'volume-up'
+                        }
                         size={15}
                         color={speakingId === item.id ? '#2dd4bf' : iconColor}
                       />

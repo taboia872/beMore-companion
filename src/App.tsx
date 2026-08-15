@@ -232,6 +232,7 @@ export default function App() {
                 setSettings(legacy);
               });
             }}
+            onCancel={() => setAddServerMode(false)}
           />
         </View>
       )}

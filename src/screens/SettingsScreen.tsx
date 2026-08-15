@@ -25,9 +25,12 @@ import {
   getAllModels,
   getModel,
   patchModel,
+  syncModelsFromFetch,
 } from '../data/modelDb';
 import {loadSettingsV2, patchSettingsV2} from '../data/appSettings';
 import {shortModelName, displayModelName} from '../utils/modelName';
+import {fetchModels} from '../services/ServerService';
+import {loadApiKey} from '../data/keychainDb';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 import {getTheme, ThemeColors} from '../utils/theme';
 
@@ -162,6 +165,11 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   // Estado de loading p/ delete de servidor
   const [deleting, setDeleting] = useState(false);
 
+  // Servidor expandido no card de Servidores (null = nenhum)
+  const [expandedServerId, setExpandedServerId] = useState<string | null>(null);
+  // Servidor sendo atualizado (refresh modelos)
+  const [refreshingServerId, setRefreshingServerId] = useState<string | null>(null);
+
   // Estado p/ forçar re-render após toggle de favorito (MMKV é síncrono,
   // mas não dispara re-render automaticamente)
   const [, setFavTick] = useState(0);
@@ -174,18 +182,20 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const activeServerId = settingsV2.activeServerId;
   const activeServer = activeServerId ? getServer(activeServerId) : null;
 
-  // Modelos do servidor ativo (chat/LLM) — apenas visíveis (não-hidden)
+  // Modelos do servidor ativo (chat/LLM) — apenas visíveis E favoritos
+  // (para seleção no card de Modelo de Linguagem). Todos os modelos
+  // aparecem no card de Servidores ao expandir o servidor.
   const serverModels: ModelEntry[] = activeServerId
-    ? getModelsByServer(activeServerId).filter(m => !m.isHidden)
+    ? getModelsByServer(activeServerId).filter(m => !m.isHidden && m.isFavorite)
     : [];
 
-  // Modelos STT de todos os servidores (isStt === true)
+  // Modelos STT de todos os servidores — apenas favoritos para seleção
   const allModels: ModelEntry[] = getAllModels();
   const sttModels: ModelEntry[] = allModels.filter(
-    m => m.isStt === true && !m.isHidden,
+    m => m.isStt === true && !m.isHidden && m.isFavorite,
   );
   const ttsModels: ModelEntry[] = allModels.filter(
-    m => m.isTts === true && !m.isHidden,
+    m => m.isTts === true && !m.isHidden && m.isFavorite,
   );
 
   // --- Helpers de ordenação (favoritos primeiro) ---
@@ -238,6 +248,35 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const toggleFavorite = (model: ModelEntry) => {
     patchModel(model.id, {isFavorite: !model.isFavorite});
     refreshFav();
+  };
+
+  /** Re-fetch dos modelos de um servidor. Preserva favoritos existentes
+   *  (syncModelsFromFetch só atualiza timestamp, não reset isFavorite). */
+  const refreshModels = async (server: ServerEntry) => {
+    setRefreshingServerId(server.id);
+    try {
+      // Carrega API key do Keychain para o fetch
+      let apiKey = '';
+      if (server.apiKeyCount > 0) {
+        apiKey = await loadApiKey(server.id, server.activeKeyIndex);
+      }
+      const modelIds = await fetchModels(server, apiKey);
+      const {added, updated, hidden} = syncModelsFromFetch(server.id, modelIds);
+      refreshFav();
+      if (added === 0 && updated === 0 && hidden === 0) {
+        Alert.alert('Atualizado', 'Nenhuma mudança nos modelos disponíveis.');
+      } else {
+        const parts: string[] = [];
+        if (added > 0) parts.push(`${added} novo(s)`);
+        if (updated > 0) parts.push(`${updated} atualizado(s)`);
+        if (hidden > 0) parts.push(`${hidden} removido(s)`);
+        Alert.alert('Modelos atualizados', parts.join(', '));
+      }
+    } catch (e: any) {
+      Alert.alert('Erro ao atualizar', e?.message ?? 'Verifique a conexão e a API key.');
+    } finally {
+      setRefreshingServerId(null);
+    }
   };
 
   const handleDeleteServer = (server: ServerEntry) => {
@@ -334,7 +373,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
 
         <ScrollView contentContainerStyle={s.container}>
           {/* ====================================================== */}
-          {/* Card: Servidores — lista de servidores cadastrados     */}
+          {/* Card: Servidores — lista expansível com modelos          */}
           {/* ====================================================== */}
           <Card
             title="Servidores"
@@ -344,8 +383,8 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
             {allServers.length === 0 ? (
               <>
                 <Text style={s.hint}>
-                  Nenhum servidor cadastrado. Use o onboarding para adicionar
-                  servidores.
+                  Nenhum servidor cadastrado. Toque em adicionar para criar
+                  um novo servidor.
                 </Text>
                 <TouchableOpacity
                   style={s.addServerBtn}
@@ -359,61 +398,151 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                 {allServers.map(server => {
                   const isActive = server.id === settingsV2.activeServerId;
                   const badgeColor = formatBadgeColor(server.format);
+                  const isExpanded = expandedServerId === server.id;
+                  const isRefreshing = refreshingServerId === server.id;
+                  const serverModelsAll = getModelsByServer(server.id).filter(m => !m.isHidden);
                   return (
-                    <TouchableOpacity
-                      key={server.id}
-                      style={[s.serverItem, isActive && s.serverItemActive]}
-                      onPress={() => selectServer(server)}
-                      disabled={isActive}>
-                      <Icon
-                        name={server.icon as any}
-                        size={20}
-                        color={isActive ? theme.accent : theme.textSecondary}
-                      />
-                      <View style={s.serverItemInfo}>
-                        <Text
-                          style={[
-                            s.serverItemName,
-                            isActive && s.serverItemNameActive,
-                          ]}
-                          numberOfLines={1}>
-                          {server.name}
-                        </Text>
-                        <Text
-                          style={s.serverItemUrl}
-                          numberOfLines={1}>
-                          {server.baseUrl}
-                        </Text>
-                      </View>
-                      {/* Format badge */}
+                    <View key={server.id}>
+                      {/* Header do servidor — clicável expande/colapsa */}
                       <View
-                        style={[s.formatBadge, {backgroundColor: badgeColor}]}>
-                        <Text style={s.formatBadgeText}>
-                          {server.format.toUpperCase()}
-                        </Text>
+                        style={[s.serverItem, isActive && s.serverItemActive]}>
+                        <TouchableOpacity
+                          style={{flexDirection: 'row', alignItems: 'center', flex: 1, gap: 10}}
+                          onPress={() => setExpandedServerId(isExpanded ? null : server.id)}>
+                          <Icon
+                            name={server.icon as any}
+                            size={20}
+                            color={isActive ? theme.accent : theme.textSecondary}
+                          />
+                          <View style={s.serverItemInfo}>
+                            <Text
+                              style={[
+                                s.serverItemName,
+                                isActive && s.serverItemNameActive,
+                              ]}
+                              numberOfLines={1}>
+                              {server.name}
+                            </Text>
+                            <Text
+                              style={s.serverItemUrl}
+                              numberOfLines={1}>
+                              {server.baseUrl}
+                            </Text>
+                          </View>
+                          {/* Format badge */}
+                          <View
+                            style={[s.formatBadge, {backgroundColor: badgeColor}]}>
+                            <Text style={s.formatBadgeText}>
+                              {server.format.toUpperCase()}
+                            </Text>
+                          </View>
+                          {/* Free badge */}
+                          {server.hasFreeModels && (
+                            <View style={s.freeBadge}>
+                              <Text style={s.freeBadgeText}>FREE</Text>
+                            </View>
+                          )}
+                        </TouchableOpacity>
+                        {/* Refresh button */}
+                        <TouchableOpacity
+                          style={s.serverDeleteBtn}
+                          onPress={() => refreshModels(server)}
+                          disabled={isRefreshing}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          {isRefreshing ? (
+                            <ActivityIndicator size={16} color={theme.accent} />
+                          ) : (
+                            <Icon name="refresh" size={18} color={theme.accent} />
+                          )}
+                        </TouchableOpacity>
+                        {/* Delete button */}
+                        <TouchableOpacity
+                          style={s.serverDeleteBtn}
+                          onPress={() => handleDeleteServer(server)}
+                          disabled={deleting}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          <Icon
+                            name="delete"
+                            size={18}
+                            color={theme.errorText}
+                          />
+                        </TouchableOpacity>
+                        {/* Expand chevron */}
+                        <Icon
+                          name={isExpanded ? 'expand-less' : 'expand-more'}
+                          size={20}
+                          color={theme.textSecondary}
+                        />
                       </View>
-                      {/* Free badge */}
-                      {server.hasFreeModels && (
-                        <View style={s.freeBadge}>
-                          <Text style={s.freeBadgeText}>FREE</Text>
+                      {/* Modelos do servidor (expandido) */}
+                      {isExpanded && (
+                        <View style={s.serverModelsList}>
+                          {serverModelsAll.length === 0 ? (
+                            <Text style={s.hint}>
+                              Nenhum modelo. Toque em refresh para buscar.
+                            </Text>
+                          ) : (
+                            serverModelsAll.map(model => {
+                              return (
+                                <View
+                                  key={model.id}
+                                  style={s.serverModelRow}>
+                                  <Icon
+                                    name="memory"
+                                    size={16}
+                                    color={theme.textSecondary}
+                                  />
+                                  <View style={{flex: 1}}>
+                                    <Text
+                                      style={s.dropdownItemText}
+                                      numberOfLines={1}>
+                                      {modelDisplayName(model)}
+                                    </Text>
+                                    <View
+                                      style={{
+                                        flexDirection: 'row',
+                                        gap: 4,
+                                        marginTop: 2,
+                                        flexWrap: 'wrap',
+                                      }}>
+                                      {renderAllBadges(model, s)}
+                                      {model.isFree && (
+                                        <View style={s.freeBadge}>
+                                          <Text style={s.freeBadgeText}>FREE</Text>
+                                        </View>
+                                      )}
+                                    </View>
+                                  </View>
+                                  {/* Toggle favorito */}
+                                  <TouchableOpacity
+                                    onPress={() => toggleFavorite(model)}
+                                    hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                                    style={s.favBtn}>
+                                    <Icon
+                                      name={model.isFavorite ? 'star' : 'star-border'}
+                                      size={20}
+                                      color={model.isFavorite ? '#e3b341' : theme.textMuted}
+                                    />
+                                  </TouchableOpacity>
+                                </View>
+                              );
+                            })
+                          )}
+                          {/* Refresh inline */}
+                          <TouchableOpacity
+                            style={[s.addServerBtn, {marginTop: 4}]}
+                            onPress={() => refreshModels(server)}
+                            disabled={isRefreshing}>
+                            {isRefreshing ? (
+                              <ActivityIndicator size={16} color={theme.accent} />
+                            ) : (
+                              <Icon name="refresh" size={16} color={theme.accent} />
+                            )}
+                            <Text style={s.addServerBtnText}>Atualizar modelos</Text>
+                          </TouchableOpacity>
                         </View>
                       )}
-                      {/* Delete button */}
-                      <TouchableOpacity
-                        style={s.serverDeleteBtn}
-                        onPress={() => handleDeleteServer(server)}
-                        disabled={deleting}
-                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                        <Icon
-                          name="delete"
-                          size={18}
-                          color={theme.errorText}
-                        />
-                      </TouchableOpacity>
-                      {isActive && (
-                        <Icon name="check" size={18} color="#3fb950" />
-                      )}
-                    </TouchableOpacity>
+                    </View>
                   );
                 })}
 
@@ -503,12 +632,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
             <Text style={s.label}>Modelo</Text>
             {!activeServerId ? (
               <Text style={s.hint}>
-                Selecione um servidor acima para ver os modelos disponíveis.
+                Selecione um servidor acima para ver os favoritos.
               </Text>
             ) : sortedServerModels.length === 0 ? (
               <Text style={s.hint}>
-                Nenhum modelo. Volte ao onboarding ou adicione um servidor para
-                buscar modelos.
+                Nenhum favorito neste servidor. Vá em Servidores e marque
+                modelos com a estrela para vê-los aqui.
               </Text>
             ) : (
               <View style={s.dropdownList}>
@@ -750,8 +879,8 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                 <Text style={s.label}>Modelo STT online</Text>
                 {sortedSttModels.length === 0 ? (
                   <Text style={s.hint}>
-                    Nenhum modelo STT encontrado. Volte ao onboarding ou
-                    adicione um servidor com modelos de transcrição.
+                    Nenhum favorito STT. Vá em Servidores e marque modelos
+                    de transcrição com a estrela.
                   </Text>
                 ) : (
                   <View style={s.dropdownList}>
@@ -921,8 +1050,8 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
             <Text style={s.label}>Modelo TTS</Text>
             {sortedTtsModels.length === 0 ? (
               <Text style={s.hint}>
-                Nenhum modelo TTS encontrado. Volte ao onboarding ou adicione
-                um servidor com modelos de síntese de voz.
+                Nenhum favorito TTS. Vá em Servidores e marque modelos
+                de síntese de voz com a estrela.
               </Text>
             ) : (
               <View style={s.dropdownList}>
@@ -1568,6 +1697,20 @@ function getStyles(t: ThemeColors) {
     favBtn: {
       padding: 4,
       marginLeft: 4,
+    },
+    serverModelsList: {
+      marginTop: 4,
+      marginBottom: 8,
+      paddingLeft: 30,
+      gap: 2,
+    },
+    serverModelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: t.bgSurface,
     },
   });
 }

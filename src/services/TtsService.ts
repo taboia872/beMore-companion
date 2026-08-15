@@ -348,9 +348,11 @@ function playAudioFile(path: string): Promise<void> {
         return;
       }
       activeSound = sound;
+      _paused = false;
       sound.play((success) => {
         sound.release();
         if (activeSound === sound) activeSound = null;
+        _paused = false;
         resolve();
       });
     });
@@ -366,7 +368,45 @@ export function stopSpeaking(): void {
     activeSound.release();
     activeSound = null;
   }
+  _paused = false;
 }
+
+/**
+ * Pausa a reprodução de TTS ativa, se houver.
+ * O áudio permanece carregado — use resumeSpeaking() para retomar.
+ */
+export function pauseSpeaking(): void {
+  if (activeSound) {
+    activeSound.pause();
+    _paused = true;
+  }
+}
+
+/**
+ * Retoma a reprodução de TTS pausada, se houver.
+ */
+export function resumeSpeaking(): void {
+  if (activeSound) {
+    activeSound.play();
+    _paused = false;
+  }
+}
+
+/** Estado de reprodução: 'idle' | 'playing' | 'paused' */
+export type TtsState = 'idle' | 'playing' | 'paused';
+
+/**
+ * Retorna o estado atual da reprodução de TTS.
+ */
+export function getTtsState(): TtsState {
+  if (!activeSound) return 'idle';
+  // react-native-sound não tem getState(); controlamos via flag.
+  // O activeSound existe quando carregado, pause() não o nullifica.
+  return _paused ? 'paused' : 'playing';
+}
+
+// Flag interna — pause() não destrói o activeSound, só pausa.
+let _paused = false;
 
 /**
  * Verifica se há TTS tocando no momento.

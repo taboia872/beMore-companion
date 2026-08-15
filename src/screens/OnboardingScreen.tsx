@@ -44,18 +44,28 @@ type Step = 'welcome' | 'preset' | 'apikey' | 'models' | 'done';
 
 interface Props {
   onConclude: () => void;
+  /** Quando fornecido, o botão Voltar no step 'welcome' chama onCancel
+   *  em vez de deixar o SO fechar o app. Usado no modo add-server. */
+  onCancel?: () => void;
 }
 
-export function OnboardingScreen({onConclude}: Props) {
+export function OnboardingScreen({onConclude, onCancel}: Props) {
   const theme = getTheme('dark'); // onboarding sempre dark (ainda não tem settings)
   const [step, setStep] = useState<Step>('welcome');
   const [isOnline, setIsOnline] = useState(true);
 
-  // Botão "Voltar" físico do Android: volta um stepinternamente,
-  // só fecha no step 'welcome' (deixando o SO agir).
+  // Botão "Voltar" físico do Android: volta um step internamente,
+  // só fecha no step 'welcome'. Em modo add-server (onCancel definido),
+  // chama onCancel em vez de deixar o SO agir.
   useEffect(() => {
     const handler = () => {
-      if (step === 'welcome') return false; // deixa o SO agir
+      if (step === 'welcome') {
+        if (onCancel) {
+          onCancel();
+          return true; // consome o back
+        }
+        return false; // deixa o SO agir (onboarding inicial)
+      }
       if (step === 'preset') setStep('welcome');
       else if (step === 'apikey') setStep('preset');
       else if (step === 'models') setStep('apikey');
@@ -63,7 +73,7 @@ export function OnboardingScreen({onConclude}: Props) {
     };
     const sub = BackHandler.addEventListener('hardwareBackPress', handler);
     return () => sub.remove();
-  }, [step]);
+  }, [step, onCancel]);
 
   // Preset selecionado (ou null = custom)
   const [selectedPreset, setSelectedPreset] = useState<ServerPreset | null>(null);
