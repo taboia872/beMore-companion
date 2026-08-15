@@ -50,14 +50,12 @@ function isGemini(baseUrl: string): boolean {
 /**
  * Constrói a URL completa do endpoint de síntese.
  * OpenAI-compat: {baseUrl}/audio/speech
- * Gemini: {baseUrl}/models/{model}:generateContent?key={apiKey}
+ * Gemini: {baseUrl}/models/{model}:generateContent (auth via header, não query)
  */
-function buildSpeechUrl(baseUrl: string, model: string, apiKey: string): string {
+function buildSpeechUrl(baseUrl: string, model: string): string {
   const clean = baseUrl.trim().replace(/\/+$/, '');
   if (isGemini(clean)) {
-    // Gemini: ?key= na query string
-    const key = apiKey ? `?key=${encodeURIComponent(apiKey)}` : '';
-    return `${clean}/models/${model}:generateContent${key}`;
+    return `${clean}/models/${model}:generateContent`;
   }
   return `${clean}/audio/speech`;
 }
@@ -208,7 +206,7 @@ export function speakText(params: TtsParams): Promise<void> {
   const truncatedInput = input.length > 4000 ? input.slice(0, 4000) : input;
 
   const gemini = isGemini(baseUrl);
-  const url = buildSpeechUrl(baseUrl, model, apiKey);
+  const url = buildSpeechUrl(baseUrl, model);
 
   // Body difere entre Gemini e OpenAI-compat.
   const body = gemini
@@ -239,8 +237,12 @@ export function speakText(params: TtsParams): Promise<void> {
     // OpenAI-compat: responseType='base64' para obter MP3 binário.
     xhr.responseType = (gemini ? 'text' : 'base64') as any;
     xhr.setRequestHeader('Content-Type', 'application/json');
-    // Gemini usa ?key= na URL, não Bearer. OpenAI-compat usa Bearer.
-    if (!gemini && apiKey) {
+    // Gemini: header x-goog-api-key (FIX — antes usava ?key= query param,
+    // mas Gemini passa a rejeitar sem header de Authorization para alguns
+    // modelos/versões da API). OpenAI-compat: Bearer token.
+    if (gemini && apiKey) {
+      xhr.setRequestHeader('x-goog-api-key', apiKey);
+    } else if (!gemini && apiKey) {
       xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
     }
 
