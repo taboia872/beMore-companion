@@ -67,7 +67,7 @@ let activeSound: Sound | null = null;
  * Vozes predefinidas do Gemini TTS.
  * Referência: https://ai.google.dev/gemini-api/docs/speech-generation
  */
-const GEMINI_VOICES = [
+export const GEMINI_VOICES = [
   'Achernar', 'Achird', 'Algenib', 'Algieba', 'Alnilam',
   'Aoede', 'Autonoe', 'Charon', 'Despina', 'Enceladus',
   'Fenrir', 'Gacrux', 'Iapetus', 'Kore', 'Leda',
@@ -75,6 +75,29 @@ const GEMINI_VOICES = [
   'Sadbetanus', 'Sulafat', 'Umbriel', 'Vindemiatrix', 'Zephyr',
   'Zubenelgenubi',
 ] as const;
+
+/**
+ * Vozes padrão OpenAI/Groq TTS.
+ * Referência: https://platform.openai.com/docs/guides/text-to-speech
+ */
+export const OPENAI_VOICES = [
+  'alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer',
+] as const;
+
+/**
+ * Retorna as vozes disponíveis conforme o provedor do servidor.
+ * - Gemini: 30 vozes predefinidas (GEMINI_VOICES)
+ * - OpenAI-compat (Groq, OpenAI, Cerebras, etc): 6 vozes padrão (OPENAI_VOICES)
+ *
+ * Não há um endpoint de "listar vozes" na API OpenAI-compat — as vozes
+ * são fixas por provedor. Esta função retorna a lista conhecida.
+ */
+export function getAvailableVoices(baseUrl: string): string[] {
+  if (isGemini(baseUrl)) {
+    return [...GEMINI_VOICES];
+  }
+  return [...OPENAI_VOICES];
+}
 
 /**
  * Converte um nome de voz para o formato aceito pelo Gemini.
@@ -413,4 +436,19 @@ let _paused = false;
  */
 export function isSpeaking(): boolean {
   return activeSound !== null;
+}
+
+/**
+ * Testa uma voz específica sintetizando uma frase curta.
+ * Para qualquer reprodução anterior antes de iniciar o teste.
+ *
+ * @param params Mesmos parâmetros de speakText, mas input é ignorado
+ *               (usa uma frase fixa de teste).
+ */
+export function testVoice(params: Omit<TtsParams, 'input'>): Promise<void> {
+  stopSpeaking();
+  return speakText({
+    ...params,
+    input: 'Olá! Esta é uma teste de voz.',
+  });
 }

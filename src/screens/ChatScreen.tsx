@@ -595,7 +595,7 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
   };
 
   const toggleMic = async () => {
-    const sttMode = settings.sttMode ?? 'on-device';
+    const sttMode = settings.sttMode ?? 'online';
     const sttReady =
       sttMode === 'online'
         ? !!settings.sttOnlineModel?.trim() &&

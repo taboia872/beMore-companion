@@ -14,7 +14,7 @@ import {
   FlatList,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
-import {AppSettingsV2, ServerEntry, ModelEntry, ServerFormat} from '../types';
+import {AppSettingsV2, ServerEntry, ModelEntry} from '../types';
 import {
   getAllServers,
   getServer,
@@ -32,6 +32,7 @@ import {shortModelName, displayModelName} from '../utils/modelName';
 import {fetchModels} from '../services/ServerService';
 import {loadApiKey} from '../data/keychainDb';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
+import {getAvailableVoices, testVoice, stopSpeaking} from '../services/TtsService';
 import {getTheme, ThemeColors} from '../utils/theme';
 
 /**
@@ -175,6 +176,10 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const [, setFavTick] = useState(0);
   const refreshFav = () => setFavTick(t => t + 1);
 
+  // Estado para vozes TTS
+  const [ttsVoices, setTtsVoices] = useState<string[]>([]);
+  const [testingVoice, setTestingVoice] = useState<string | null>(null);
+
   // --- Dados (síncronos, MMKV) ---
 
   const allServers: ServerEntry[] = getAllServers();
@@ -182,11 +187,18 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const activeServerId = settingsV2.activeServerId;
   const activeServer = activeServerId ? getServer(activeServerId) : null;
 
+  // Resolvedor de servidor TTS (override explícito, senão usa o do chat)
+  const ttsServer = settingsV2.ttsServerId
+    ? getServer(settingsV2.ttsServerId)
+    : activeServer;
+
   // Modelos do servidor ativo (chat/LLM) — apenas visíveis E favoritos
-  // (para seleção no card de Modelo de Linguagem). Todos os modelos
-  // aparecem no card de Servidores ao expandir o servidor.
+  // E que NÃO são STT/TTS (esses aparecem nos cards de Voz).
+  // Image gen também é excluído (aparece no card de Image Gen).
   const serverModels: ModelEntry[] = activeServerId
-    ? getModelsByServer(activeServerId).filter(m => !m.isHidden && m.isFavorite)
+    ? getModelsByServer(activeServerId).filter(
+      m => !m.isHidden && m.isFavorite && !m.isStt && !m.isTts && !m.isImageGen,
+    )
     : [];
 
   // Modelos STT de todos os servidores — apenas favoritos para seleção
@@ -248,6 +260,41 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const toggleFavorite = (model: ModelEntry) => {
     patchModel(model.id, {isFavorite: !model.isFavorite});
     refreshFav();
+  };
+
+  /** Busca vozes disponíveis do servidor TTS ativo. */
+  const handleFetchVoices = () => {
+    if (!ttsServer) {
+      Alert.alert('Sem servidor', 'Selecione um servidor TTS primeiro.');
+      return;
+    }
+    const voices = getAvailableVoices(ttsServer.baseUrl);
+    setTtsVoices(voices);
+  };
+
+  /** Testa uma voz sintetizando uma frase curta. */
+  const handleTestVoice = async (voice: string) => {
+    if (!ttsServer || !activeTtsModel) {
+      Alert.alert('Configuração incompleta', 'Selecione um servidor e modelo TTS.');
+      return;
+    }
+    setTestingVoice(voice);
+    try {
+      let apiKey = '';
+      if (ttsServer.apiKeyCount > 0) {
+        apiKey = await loadApiKey(ttsServer.id, ttsServer.activeKeyIndex);
+      }
+      await testVoice({
+        baseUrl: ttsServer.baseUrl,
+        apiKey,
+        model: activeTtsModel.modelId,
+        voice,
+      });
+    } catch (e: any) {
+      Alert.alert('Erro ao testar voz', e?.message ?? 'Verifique a configuração.');
+    } finally {
+      setTestingVoice(null);
+    }
   };
 
   /** Re-fetch dos modelos de um servidor. Preserva favoritos existentes
@@ -316,21 +363,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     );
   };
 
-  const formatBadgeColor = (format: ServerFormat): string => {
-    switch (format) {
-      case 'openai':
-        return '#10a37f';
-      case 'gemini':
-        return '#4285f4';
-      case 'ollama':
-        return '#6d4aff';
-      case 'pollinations':
-        return '#e84393';
-      default:
-        return '#8b949e';
-    }
-  };
-
   // --- Nome legível do modelo ---
 
   const modelDisplayName = (model: ModelEntry): string => {
@@ -397,7 +429,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
               <>
                 {allServers.map(server => {
                   const isActive = server.id === settingsV2.activeServerId;
-                  const badgeColor = formatBadgeColor(server.format);
                   const isExpanded = expandedServerId === server.id;
                   const isRefreshing = refreshingServerId === server.id;
                   const serverModelsAll = getModelsByServer(server.id).filter(m => !m.isHidden);
@@ -429,19 +460,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                               {server.baseUrl}
                             </Text>
                           </View>
-                          {/* Format badge */}
-                          <View
-                            style={[s.formatBadge, {backgroundColor: badgeColor}]}>
-                            <Text style={s.formatBadgeText}>
-                              {server.format.toUpperCase()}
-                            </Text>
-                          </View>
-                          {/* Free badge */}
-                          {server.hasFreeModels && (
-                            <View style={s.freeBadge}>
-                              <Text style={s.freeBadgeText}>FREE</Text>
-                            </View>
-                          )}
                         </TouchableOpacity>
                         {/* Refresh button */}
                         <TouchableOpacity
@@ -713,82 +731,16 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
           </Card>
 
           {/* ====================================================== */}
-          {/* Card: Voz (STT) — toggle online/on-device + modelo     */}
+          {/* Card: Voz (STT) — transcription online                   */}
           {/* ====================================================== */}
           <Card title="Voz (STT)" icon="mic" theme={theme}>
-            {/* Toggle: Online ↔ On-device */}
-            <View style={s.row}>
-              <TouchableOpacity
-                style={[s.tab, settingsV2.sttMode === 'online' && s.tabActive]}
-                onPress={() => onChangeV2({sttMode: 'online'})}>
-                <Icon
-                  name="cloud-queue"
-                  size={18}
-                  color={
-                    settingsV2.sttMode === 'online'
-                      ? theme.accentText
-                      : theme.textSecondary
-                  }
-                />
-                <Text
-                  style={[
-                    s.tabText,
-                    settingsV2.sttMode === 'online' && s.tabTextActive,
-                  ]}>
-                  Online
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  s.tab,
-                  settingsV2.sttMode === 'on-device' && s.tabActive,
-                ]}
-                onPress={() => onChangeV2({sttMode: 'on-device'})}>
-                <Icon
-                  name="smartphone"
-                  size={18}
-                  color={
-                    settingsV2.sttMode === 'on-device'
-                      ? theme.accentText
-                      : theme.textSecondary
-                  }
-                />
-                <Text
-                  style={[
-                    s.tabText,
-                    settingsV2.sttMode === 'on-device' && s.tabTextActive,
-                  ]}>
-                  On-device
-                </Text>
-              </TouchableOpacity>
-            </View>
+            <Text style={s.hint}>
+              Transcrição via API online (Groq, OpenAI, etc). Escolha o
+              servidor e modelo STT abaixo.
+            </Text>
 
-            {settingsV2.sttMode === 'on-device' ? (
-              <>
-                <Text style={s.hint}>
-                  Modelo Whisper GGUF no dispositivo. Deixe vazio para
-                  desativar. Ex: ggml-tiny.bin (~75 MB).
-                </Text>
-                <Text style={s.label}>Caminho do modelo</Text>
-                <TextInput
-                  style={s.input}
-                  value={settingsV2.sttModelPath ?? ''}
-                  placeholder="/data/data/com.bemore.companion/files/models/ggml-tiny.bin"
-                  placeholderTextColor={theme.textMuted}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  onChangeText={v => onChangeV2({sttModelPath: v})}
-                />
-              </>
-            ) : (
-              <>
-                <Text style={s.hint}>
-                  Transcrição via API online (Groq, OpenAI, etc). Escolha o
-                  servidor e modelo STT abaixo.
-                </Text>
-
-                {/* Servidor STT (override) — null = mesmo do chat */}
-                <Text style={s.label}>Servidor STT</Text>
+            {/* Servidor STT (override) — null = mesmo do chat */}
+            <Text style={s.label}>Servidor STT</Text>
                 <TouchableOpacity
                   style={s.dropdownBtn}
                   onPress={() => setSttServerDropdownOpen(v => !v)}>
@@ -955,8 +907,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                     </Text>
                   </View>
                 )}
-              </>
-            )}
           </Card>
 
           {/* ====================================================== */}
@@ -1128,19 +1078,65 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
 
             {/* Voz */}
             <Text style={s.label}>Voz</Text>
-            <TextInput
-              style={s.input}
-              value={settingsV2.ttsVoice ?? ''}
-              placeholder="alloy, nova, shimmer, echo, fable, onyx"
-              placeholderTextColor={theme.textMuted}
-              autoCapitalize="none"
-              autoCorrect={false}
-              onChangeText={v => onChangeV2({ttsVoice: v})}
-            />
+            <TouchableOpacity
+              style={[s.dropdownBtn, {marginTop: 2}]}
+              onPress={handleFetchVoices}
+              disabled={!ttsServer || !activeTtsModel}>
+              <Icon name="record-voice-over" size={20} color={theme.accent} />
+              <Text style={s.dropdownBtnText} numberOfLines={1}>
+                {settingsV2.ttsVoice || 'Buscar vozes disponíveis'}
+              </Text>
+              <Icon name="refresh" size={18} color={theme.textSecondary} />
+            </TouchableOpacity>
             <Text style={s.hint}>
-              Vozes podem variar por provedor. OpenAI/Groq: alloy, nova,
-              shimmer, echo, fable, onyx. Deixe vazio para alloy.
+              Toque para carregar as vozes disponíveis do provedor. Selecione
+              uma voz para testar e definir.
             </Text>
+
+            {/* Lista de vozes com botão de teste */}
+            {ttsVoices.length > 0 && (
+              <View style={s.dropdownList}>
+                {ttsVoices.map(voice => {
+                  const isActive = voice === (settingsV2.ttsVoice ?? '');
+                  const isTesting = testingVoice === voice;
+                  return (
+                    <View
+                      key={voice}
+                      style={[s.dropdownItem, isActive && s.dropdownItemActive]}>
+                      <TouchableOpacity
+                        style={{flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8}}
+                        onPress={() => onChangeV2({ttsVoice: voice})}>
+                        <Icon
+                          name={isActive ? 'check-circle' : 'radio-button-unchecked'}
+                          size={18}
+                          color={isActive ? '#3fb950' : theme.textSecondary}
+                        />
+                        <Text
+                          style={[
+                            s.dropdownItemText,
+                            isActive && s.dropdownItemTextActive,
+                          ]}
+                          numberOfLines={1}>
+                          {voice}
+                        </Text>
+                      </TouchableOpacity>
+                      {/* Botão de teste */}
+                      <TouchableOpacity
+                        style={s.favBtn}
+                        onPress={() => handleTestVoice(voice)}
+                        disabled={isTesting || !ttsServer || !activeTtsModel}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                        {isTesting ? (
+                          <ActivityIndicator size={16} color={theme.accent} />
+                        ) : (
+                          <Icon name="play-arrow" size={20} color={theme.accent} />
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
           </Card>
 
           {/* ====================================================== */}
@@ -1665,16 +1661,6 @@ function getStyles(t: ThemeColors) {
     serverDeleteBtn: {
       padding: 6,
       marginLeft: 4,
-    },
-    formatBadge: {
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-      borderRadius: 4,
-    },
-    formatBadgeText: {
-      color: t.accentText,
-      fontSize: 10,
-      fontWeight: '700',
     },
     addServerBtn: {
       flexDirection: 'row',

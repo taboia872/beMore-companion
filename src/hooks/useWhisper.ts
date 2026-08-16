@@ -49,7 +49,7 @@ export function useWhisper(): UseWhisper {
 
   const transcribe = useCallback(
     async (wavPath: string, settings: AppSettings): Promise<string | null> => {
-      const mode = settings.sttMode ?? 'on-device';
+      const mode = settings.sttMode ?? 'online';
 
       if (mode === 'online') {
         return transcribeOnline(wavPath, settings, setStatus, setErrorMessage, setLastTranscript);

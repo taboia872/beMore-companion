@@ -334,8 +334,8 @@ export const SERVER_PRESETS: ServerPreset[] = [
   },
   // --- Local (sem API key) ---
   {
-    name: 'Ollama Local',
-    url: 'http://localhost:11434/v1',
+    name: 'Localhost',
+    url: 'http://localhost:8080/v1',
     icon: 'dns',
     format: 'ollama',
     hasFreeModels: true,

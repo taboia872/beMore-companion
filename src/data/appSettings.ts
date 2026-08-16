@@ -53,7 +53,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     model: 'llama3',
   },
   theme: 'dark',
-  sttMode: 'on-device',
+  sttMode: 'online',
   sttModelPath: '',
   sttOnlineModel: '',
   sttServerOverride: '',
@@ -183,7 +183,7 @@ export const DEFAULT_SETTINGS_V2: AppSettingsV2 = {
   imageGenServerId: null,
   systemPrompt: 'You are a helpful assistant.',
   theme: 'dark',
-  sttMode: 'on-device',
+  sttMode: 'online',
   sttModelPath: '',
   ttsVoice: 'alloy',
   ttsAutoPlay: false,
@@ -296,7 +296,7 @@ export async function migrateToV2(): Promise<AppSettingsV2> {
     // Migra config geral
     settings.systemPrompt = legacy.systemPrompt;
     settings.theme = legacy.theme ?? 'dark';
-    settings.sttMode = legacy.sttMode ?? 'on-device';
+    settings.sttMode = legacy.sttMode ?? 'online';
     settings.sttModelPath = legacy.sttModelPath ?? '';
     settings.ttsVoice = legacy.ttsVoice ?? 'alloy';
     settings.ttsAutoPlay = legacy.ttsAutoPlay ?? false;
