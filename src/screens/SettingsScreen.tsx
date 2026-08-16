@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useState, useRef} from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,9 @@ import {
   ActivityIndicator,
   Modal,
   FlatList,
+  Animated,
+  PanResponder,
+  Dimensions,
 } from 'react-native';
 import Icon from '@react-native-vector-icons/material-icons';
 import {AppSettingsV2, ServerEntry, ModelEntry} from '../types';
@@ -154,6 +157,156 @@ function renderAllBadges(
   );
 }
 
+// ---------------------------------------------------------------------------
+// CapabilityToggle — linha de toggle para uma capability no modal de edição
+// ---------------------------------------------------------------------------
+interface CapabilityToggleProps {
+  label: string;
+  icon: string;
+  color: string;
+  value: boolean;
+  onToggle: () => void;
+}
+
+function CapabilityToggle({label, icon, color, value, onToggle}: CapabilityToggleProps) {
+  return (
+    <TouchableOpacity
+      style={{
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 10,
+        paddingVertical: 12,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(128,128,128,0.2)',
+      }}
+      onPress={onToggle}
+      activeOpacity={0.7}>
+      <Icon name={icon as any} size={20} color={color} />
+      <Text style={{flex: 1, color: '#c9d1d9', fontSize: 14}}>{label}</Text>
+      <Icon
+        name={value ? 'check-box' : 'check-box-outline-blank'}
+        size={24}
+        color={value ? '#3fb950' : '#8b949e'}
+      />
+    </TouchableOpacity>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SwipeableModelRow — linha de modelo com swipe à esquerda revelando actions
+// ---------------------------------------------------------------------------
+
+const ACTION_WIDTH = 72; // largura de cada botão de ação (ocultar + tags)
+
+interface SwipeableModelRowProps {
+  model: ModelEntry;
+  theme: ThemeColors;
+  styles: ReturnType<typeof getStyles>;
+  modelDisplayName: (m: ModelEntry) => string;
+  renderAllBadges: (m: ModelEntry, s: ReturnType<typeof getStyles>) => React.ReactNode;
+  onToggleFavorite: (m: ModelEntry) => void;
+  onHide: (m: ModelEntry) => void;
+  onEditTags: (m: ModelEntry) => void;
+}
+
+function SwipeableModelRow({
+  model, theme, styles, modelDisplayName, renderAllBadges,
+  onToggleFavorite, onHide, onEditTags,
+}: SwipeableModelRowProps) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const [open, setOpen] = useState(false);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => {
+        return Math.abs(gestureState.dx) > 10 && Math.abs(gestureState.dy) < 10;
+      },
+      onPanResponderMove: (_, gestureState) => {
+        // Permite arrastar para a esquerda (negativo) a partir de 0 ou da posição aberta
+        const newValue = open
+          ? Math.min(0, gestureState.dx - ACTION_WIDTH * 2)
+          : Math.max(-ACTION_WIDTH * 2, gestureState.dx);
+        translateX.setValue(newValue);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        const threshold = -ACTION_WIDTH;
+        const shouldOpen = open
+          ? gestureState.dx > -ACTION_WIDTH // já aberto: fechar se arrastar pouco
+          : gestureState.dx < threshold;     // fechado: abrir se arrastar bastante
+        if (shouldOpen) {
+          Animated.spring(translateX, {
+            toValue: -ACTION_WIDTH * 2,
+            useNativeDriver: true,
+            tension: 80,
+            friction: 10,
+          }).start();
+          setOpen(true);
+        } else {
+          Animated.spring(translateX, {
+            toValue: 0,
+            useNativeDriver: true,
+            tension: 80,
+            friction: 10,
+          }).start();
+          setOpen(false);
+        }
+      },
+    }),
+  ).current;
+
+  return (
+    <View style={{overflow: 'hidden'}}>
+      {/* Actions de fundo (reveladas ao deslizar) */}
+      <View style={styles.swipeActionsContainer}>
+        <TouchableOpacity
+          style={[styles.swipeActionBtn, {backgroundColor: theme.border}]}
+          onPress={() => { onEditTags(model); Animated.spring(translateX, {toValue: 0, useNativeDriver: true}).start(); setOpen(false); }}
+          activeOpacity={0.7}>
+          <Icon name="edit" size={18} color={theme.accent} />
+          <Text style={styles.swipeActionText}>Tags</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.swipeActionBtn, {backgroundColor: theme.errorText}]}
+          onPress={() => { onHide(model); Animated.spring(translateX, {toValue: 0, useNativeDriver: true}).start(); setOpen(false); }}
+          activeOpacity={0.7}>
+          <Icon name="visibility-off" size={18} color="#fff" />
+          <Text style={[styles.swipeActionText, {color: '#fff'}]}>Ocultar</Text>
+        </TouchableOpacity>
+      </View>
+      {/* Conteúdo da linha (desliza) */}
+      <Animated.View
+        style={[styles.swipeRowContent, {transform: [{translateX}]}]}
+        {...panResponder.panHandlers}>
+        <Icon name="memory" size={16} color={theme.textSecondary} />
+        <View style={{flex: 1}}>
+          <Text style={styles.dropdownItemText} numberOfLines={1}>
+            {modelDisplayName(model)}
+          </Text>
+          <View style={{flexDirection: 'row', gap: 4, marginTop: 2, flexWrap: 'wrap'}}>
+            {renderAllBadges(model, styles)}
+            {model.isFree && (
+              <View style={styles.freeBadge}>
+                <Text style={styles.freeBadgeText}>FREE</Text>
+              </View>
+            )}
+          </View>
+        </View>
+        {/* Toggle favorito */}
+        <TouchableOpacity
+          onPress={() => onToggleFavorite(model)}
+          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+          style={styles.favBtn}>
+          <Icon
+            name={model.isFavorite ? 'star' : 'star-border'}
+            size={20}
+            color={model.isFavorite ? '#e3b341' : theme.textMuted}
+          />
+        </TouchableOpacity>
+      </Animated.View>
+    </View>
+  );
+}
+
 export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: Props) {
   const theme = getTheme(settingsV2.theme);
   const s = getStyles(theme);
@@ -180,6 +333,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
   const [testingVoice, setTestingVoice] = useState<string | null>(null);
 
+  // Estado para edição de capabilities de modelo
+  const [editingModel, setEditingModel] = useState<ModelEntry | null>(null);
+
+  // Estado para seção de modelos ocultos (por servidor)
+  const [expandedHiddenId, setExpandedHiddenId] = useState<string | null>(null);
+
   // --- Dados (síncronos, MMKV) ---
 
   const allServers: ServerEntry[] = getAllServers();
@@ -197,17 +356,17 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   // Image gen também é excluído (aparece no card de Image Gen).
   const serverModels: ModelEntry[] = activeServerId
     ? getModelsByServer(activeServerId).filter(
-      m => !m.isHidden && m.isFavorite && !m.isStt && !m.isTts && !m.isImageGen,
+      m => !m.isHidden && !m.isUserHidden && m.isFavorite && !m.isStt && !m.isTts && !m.isImageGen,
     )
     : [];
 
   // Modelos STT de todos os servidores — apenas favoritos para seleção
   const allModels: ModelEntry[] = getAllModels();
   const sttModels: ModelEntry[] = allModels.filter(
-    m => m.isStt === true && !m.isHidden && m.isFavorite,
+    m => m.isStt === true && !m.isHidden && !m.isUserHidden && m.isFavorite,
   );
   const ttsModels: ModelEntry[] = allModels.filter(
-    m => m.isTts === true && !m.isHidden && m.isFavorite,
+    m => m.isTts === true && !m.isHidden && !m.isUserHidden && m.isFavorite,
   );
 
   // --- Helpers de ordenação (favoritos primeiro) ---
@@ -260,6 +419,34 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const toggleFavorite = (model: ModelEntry) => {
     patchModel(model.id, {isFavorite: !model.isFavorite});
     refreshFav();
+  };
+
+  /** Oculta um modelo manualmente (persiste entre fetchs). */
+  const hideModel = (model: ModelEntry) => {
+    patchModel(model.id, {isUserHidden: true});
+    refreshFav();
+  };
+
+  /** Re-exibe um modelo que foi ocultado manualmente. */
+  const unhideModel = (model: ModelEntry) => {
+    patchModel(model.id, {isUserHidden: false});
+    refreshFav();
+  };
+
+  /** Salva as capabilities editadas manualmente num modelo. */
+  const saveCapabilities = (
+    model: ModelEntry,
+    caps: {
+      isVision?: boolean;
+      isStt?: boolean;
+      isTts?: boolean;
+      isAnyToAny?: boolean;
+      isImageGen?: boolean;
+    },
+  ) => {
+    patchModel(model.id, caps);
+    refreshFav();
+    setEditingModel(null);
   };
 
   /** Busca vozes disponíveis do servidor TTS ativo. */
@@ -432,6 +619,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                   const isExpanded = expandedServerId === server.id;
                   const isRefreshing = refreshingServerId === server.id;
                   const serverModelsAll = getModelsByServer(server.id).filter(m => !m.isHidden);
+                  const serverModelsVisible = serverModelsAll.filter(m => !m.isUserHidden);
+                  const serverModelsHidden = serverModelsAll.filter(m => m.isUserHidden);
+                  const isHiddenSectionOpen = expandedHiddenId === server.id;
                   return (
                     <View key={server.id}>
                       {/* Header do servidor — clicável expande/colapsa */}
@@ -495,56 +685,63 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                       {/* Modelos do servidor (expandido) */}
                       {isExpanded && (
                         <View style={s.serverModelsList}>
-                          {serverModelsAll.length === 0 ? (
+                          {serverModelsVisible.length === 0 && serverModelsHidden.length === 0 ? (
                             <Text style={s.hint}>
                               Nenhum modelo. Toque em refresh para buscar.
                             </Text>
                           ) : (
-                            serverModelsAll.map(model => {
-                              return (
-                                <View
+                            <>
+                              {serverModelsVisible.map(model => (
+                                <SwipeableModelRow
                                   key={model.id}
-                                  style={s.serverModelRow}>
-                                  <Icon
-                                    name="memory"
-                                    size={16}
-                                    color={theme.textSecondary}
-                                  />
-                                  <View style={{flex: 1}}>
-                                    <Text
-                                      style={s.dropdownItemText}
-                                      numberOfLines={1}>
-                                      {modelDisplayName(model)}
-                                    </Text>
-                                    <View
-                                      style={{
-                                        flexDirection: 'row',
-                                        gap: 4,
-                                        marginTop: 2,
-                                        flexWrap: 'wrap',
-                                      }}>
-                                      {renderAllBadges(model, s)}
-                                      {model.isFree && (
-                                        <View style={s.freeBadge}>
-                                          <Text style={s.freeBadgeText}>FREE</Text>
-                                        </View>
-                                      )}
-                                    </View>
-                                  </View>
-                                  {/* Toggle favorito */}
+                                  model={model}
+                                  theme={theme}
+                                  styles={s}
+                                  modelDisplayName={modelDisplayName}
+                                  renderAllBadges={renderAllBadges}
+                                  onToggleFavorite={toggleFavorite}
+                                  onHide={hideModel}
+                                  onEditTags={setEditingModel}
+                                />
+                              ))}
+
+                              {/* Seção de modelos ocultos */}
+                              {serverModelsHidden.length > 0 && (
+                                <View>
                                   <TouchableOpacity
-                                    onPress={() => toggleFavorite(model)}
-                                    hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                                    style={s.favBtn}>
+                                    style={s.hiddenSectionHeader}
+                                    onPress={() => setExpandedHiddenId(isHiddenSectionOpen ? null : server.id)}>
                                     <Icon
-                                      name={model.isFavorite ? 'star' : 'star-border'}
-                                      size={20}
-                                      color={model.isFavorite ? '#e3b341' : theme.textMuted}
+                                      name={isHiddenSectionOpen ? 'expand-less' : 'expand-more'}
+                                      size={16}
+                                      color={theme.textSecondary}
                                     />
+                                    <Icon name="visibility-off" size={14} color={theme.textSecondary} />
+                                    <Text style={s.hiddenSectionText}>
+                                      Modelos ocultos ({serverModelsHidden.length})
+                                    </Text>
                                   </TouchableOpacity>
+                                  {isHiddenSectionOpen && (
+                                    serverModelsHidden.map(model => (
+                                      <View key={model.id} style={s.hiddenModelRow}>
+                                        <Icon name="memory" size={16} color={theme.textMuted} />
+                                        <Text
+                                          style={[s.dropdownItemText, {color: theme.textMuted}]}
+                                          numberOfLines={1}>
+                                          {modelDisplayName(model)}
+                                        </Text>
+                                        <TouchableOpacity
+                                          onPress={() => unhideModel(model)}
+                                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                                          style={s.favBtn}>
+                                          <Icon name="visibility" size={18} color={theme.accent} />
+                                        </TouchableOpacity>
+                                      </View>
+                                    ))
+                                  )}
                                 </View>
-                              );
-                            })
+                              )}
+                            </>
                           )}
                           {/* Refresh inline */}
                           <TouchableOpacity
@@ -1237,6 +1434,79 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
             </Text>
           </Card>
         </ScrollView>
+
+        {/* ====================================================== */}
+        {/* Modal: Editar capabilities de um modelo                 */}
+        {/* ====================================================== */}
+        <Modal
+          visible={editingModel !== null}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setEditingModel(null)}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalCard}>
+              {editingModel && (
+                <>
+                  <Text style={s.modalTitle} numberOfLines={1}>
+                    {modelDisplayName(editingModel)}
+                  </Text>
+                  <Text style={s.modalSubtitle}>
+                    Marque as capacidades deste modelo:
+                  </Text>
+                  <CapabilityToggle label="Visão (imagem input)" icon="visibility" color="#a371f7"
+                    value={!!editingModel.isVision}
+                    onToggle={() => setEditingModel({
+                      ...editingModel,
+                      isVision: !editingModel.isVision,
+                    })} />
+                  <CapabilityToggle label="STT (transcrição)" icon="mic" color="#f0883e"
+                    value={!!editingModel.isStt}
+                    onToggle={() => setEditingModel({
+                      ...editingModel,
+                      isStt: !editingModel.isStt,
+                    })} />
+                  <CapabilityToggle label="TTS (síntese voz)" icon="volume-up" color="#2dd4bf"
+                    value={!!editingModel.isTts}
+                    onToggle={() => setEditingModel({
+                      ...editingModel,
+                      isTts: !editingModel.isTts,
+                    })} />
+                  <CapabilityToggle label="Image Gen (gera imagem)" icon="image" color="#3fb950"
+                    value={!!editingModel.isImageGen}
+                    onToggle={() => setEditingModel({
+                      ...editingModel,
+                      isImageGen: !editingModel.isImageGen,
+                    })} />
+                  <CapabilityToggle label="Any→Any (multimodal I/O)" icon="all-inclusive" color="#d2a8ff"
+                    value={!!editingModel.isAnyToAny}
+                    onToggle={() => setEditingModel({
+                      ...editingModel,
+                      isAnyToAny: !editingModel.isAnyToAny,
+                    })} />
+                  <View style={s.modalActions}>
+                    <TouchableOpacity
+                      style={[s.modalBtn, s.modalBtnCancel]}
+                      onPress={() => setEditingModel(null)}>
+                      <Text style={s.modalBtnText}>Cancelar</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[s.modalBtn, s.modalBtnSave]}
+                      onPress={() => editingModel && saveCapabilities(editingModel, {
+                        isVision: editingModel.isVision,
+                        isStt: editingModel.isStt,
+                        isTts: editingModel.isTts,
+                        isImageGen: editingModel.isImageGen,
+                        isAnyToAny: editingModel.isAnyToAny,
+                      })}>
+                      <Text style={s.modalBtnTextSave}>Salvar</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     </View>
   );
@@ -1697,6 +1967,93 @@ function getStyles(t: ThemeColors) {
       paddingVertical: 8,
       borderBottomWidth: 1,
       borderBottomColor: t.bgSurface,
+    },
+    // --- Swipeable model row ---
+    swipeActionsContainer: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      bottom: 0,
+      flexDirection: 'row',
+      justifyContent: 'flex-end',
+    },
+    swipeActionBtn: {
+      width: ACTION_WIDTH,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 2,
+    },
+    swipeActionText: {
+      fontSize: 10,
+      fontWeight: '600',
+      color: t.accent,
+    },
+    swipeRowContent: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 8,
+      paddingRight: 8,
+      backgroundColor: t.bgSurface,
+      borderBottomWidth: 1,
+      borderBottomColor: t.bg,
+    },
+    // --- Seção de modelos ocultos ---
+    hiddenSectionHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingVertical: 8,
+      marginTop: 8,
+      borderTopWidth: 1,
+      borderTopColor: t.border,
+    },
+    hiddenSectionText: {
+      color: t.textSecondary,
+      fontSize: 12,
+      fontStyle: 'italic',
+    },
+    hiddenModelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 6,
+      opacity: 0.6,
+    },
+    // --- Modal de edição de capabilities ---
+    modalSubtitle: {
+      color: t.textSecondary,
+      fontSize: 13,
+      marginBottom: 8,
+    },
+    modalActions: {
+      flexDirection: 'row',
+      gap: 10,
+      marginTop: 12,
+    },
+    modalBtn: {
+      flex: 1,
+      paddingVertical: 12,
+      borderRadius: 10,
+      alignItems: 'center',
+    },
+    modalBtnCancel: {
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    modalBtnSave: {
+      backgroundColor: t.accent,
+    },
+    modalBtnText: {
+      color: t.text,
+      fontSize: 14,
+      fontWeight: '600',
+    },
+    modalBtnTextSave: {
+      color: t.accentText,
+      fontSize: 14,
+      fontWeight: '600',
     },
   });
 }

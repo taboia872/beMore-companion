@@ -84,7 +84,8 @@ export interface ModelEntry {
   isFree?: boolean;                // Override manual se a auto-detecção errou
   // Organização do usuário
   isFavorite: boolean;             // Aparece em lista de favoritos
-  isHidden: boolean;               // Removido das listas mas não deletado (soft delete)
+  isHidden: boolean;               // Removido das listas mas não deletado (soft delete do fetch)
+  isUserHidden: boolean;           // Ocultado manualmente pelo usuário (persiste entre fetchs)
   // Metadata de fetch
   lastFetchedAt: number;           // Date.now() do último /models fetch
 }

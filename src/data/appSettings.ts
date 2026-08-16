@@ -360,6 +360,7 @@ export async function migrateToV2(): Promise<AppSettingsV2> {
           isImageGen: false,
           isFavorite: true, // modelo ativo vira favorito
           isHidden: false,
+          isUserHidden: false,
           lastFetchedAt: Date.now(),
         };
         saveModel(modelEntry);

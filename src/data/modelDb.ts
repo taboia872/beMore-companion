@@ -177,6 +177,7 @@ export function syncModelsFromFetch(
         isImageGen: isImageGenModel(modelId),
         isFavorite: false,
         isHidden: false,
+        isUserHidden: false,
         lastFetchedAt: Date.now(),
       };
       saveModel(entry);
