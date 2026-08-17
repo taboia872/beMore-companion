@@ -341,14 +341,6 @@ export const SERVER_PRESETS: ServerPreset[] = [
     hasFreeModels: true,
     description: 'Servidor local — modelos GGUF na sua máquina',
   },
-  {
-    name: 'LM Studio',
-    url: 'http://localhost:1234/v1',
-    icon: 'laptop',
-    format: 'openai',
-    hasFreeModels: true,
-    description: 'Servidor local — qualquer modelo GGUF',
-  },
 ];
 
 export const CUSTOM_SERVER = '__custom__';

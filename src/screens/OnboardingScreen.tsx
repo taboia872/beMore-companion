@@ -67,7 +67,11 @@ export function OnboardingScreen({onConclude, onCancel}: Props) {
         return false; // deixa o SO agir (onboarding inicial)
       }
       if (step === 'preset') setStep('welcome');
-      else if (step === 'apikey') setStep('preset');
+      else if (step === 'apikey') {
+        // Se veio de Local, volta para welcome (não para preset, que filtraria errado)
+        if (!isOnline) setStep('welcome');
+        else setStep('preset');
+      }
       else if (step === 'models') setStep('apikey');
       return true; // consome o back
     };
@@ -101,10 +105,10 @@ export function OnboardingScreen({onConclude, onCancel}: Props) {
 
   const handleChooseLocal = () => {
     setIsOnline(false);
-    // Local =preset Ollama direto
-    const ollamaPreset = SERVER_PRESETS.find(p => p.format === 'ollama')!;
-    setSelectedPreset(ollamaPreset);
-    setCustomUrl(ollamaPreset.url);
+    // Local = preset Localhost direto
+    const localPreset = SERVER_PRESETS.find(p => p.format === 'ollama')!;
+    setSelectedPreset(localPreset);
+    setCustomUrl(localPreset.url);
     setStep('apikey'); // local não tem API key, mas passamos pelo step para chegar no fetch
   };
 
@@ -433,7 +437,7 @@ export function OnboardingScreen({onConclude, onCancel}: Props) {
           )}
         </TouchableOpacity>
 
-        <TouchableOpacity onPress={() => setStep('preset')}>
+        <TouchableOpacity onPress={() => !isOnline ? setStep('welcome') : setStep('preset')}>
           <Text style={[styles.backText, {color: t.textSecondary}]}>← Voltar</Text>
         </TouchableOpacity>
       </View>

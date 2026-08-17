@@ -93,8 +93,92 @@ function Card({title, icon, children, defaultExpanded = false, theme}: CardProps
   );
 }
 
-// --- Helpers para formatar badges (reutilizam getModelBadges por modelId) ---
+// --- Helpers para formatar badges ---
+// Usa os campos do ModelEntry (que incluem overrides manuais do usuário)
+// em vez de apenas getModelBadges (heurística por nome).
 
+interface BadgeInfo {
+  type: 'vision' | 'stt' | 'tts' | 'anyToAny' | 'imageGen';
+  label: string;
+}
+
+/** Retorna as capabilities efetivas de um modelo (model override > heurística). */
+function getModelEffectiveBadges(model: ModelEntry): BadgeInfo[] {
+  // Heurística base (por nome)
+  const auto = getModelBadges(model.modelId);
+  const autoTypes = new Set(auto.map(b => b.type));
+
+  const result: BadgeInfo[] = [];
+
+  // Any→Any: campo setado OU heurística
+  const anyToAny = model.isAnyToAny ?? autoTypes.has('anyToAny');
+  if (anyToAny) result.push({type: 'anyToAny', label: 'ANY→ANY'});
+
+  // STT: campo setado OU heurística
+  const stt = model.isStt ?? autoTypes.has('stt');
+  if (stt) result.push({type: 'stt', label: 'STT'});
+
+  // TTS: campo setado OU heurística
+  const tts = model.isTts ?? autoTypes.has('tts');
+  if (tts) result.push({type: 'tts', label: 'TTS'});
+
+  // Vision: campo setado OU heurística
+  const vision = model.isVision ?? autoTypes.has('vision');
+  if (vision) result.push({type: 'vision', label: 'VISÃO'});
+
+  return result;
+}
+
+function renderBadgesFromModel(
+  model: ModelEntry,
+  styles: ReturnType<typeof getStyles>,
+): React.ReactNode {
+  const badges = getModelEffectiveBadges(model);
+  return badges.map((badge, idx) => {
+    const key = `${badge.type}-${idx}`;
+    if (badge.type === 'vision') {
+      return (
+        <View key={key} style={styles.visionBadge}>
+          <Icon name="visibility" size={10} color="#a371f7" />
+          <Text style={styles.visionBadgeText}>VISÃO</Text>
+        </View>
+      );
+    }
+    if (badge.type === 'stt') {
+      return (
+        <View key={key} style={styles.sttBadge}>
+          <Icon name="mic" size={10} color="#f0883e" />
+          <Text style={styles.sttBadgeText}>STT</Text>
+        </View>
+      );
+    }
+    if (badge.type === 'tts') {
+      return (
+        <View key={key} style={styles.ttsBadge}>
+          <Icon name="volume-up" size={10} color="#2dd4bf" />
+          <Text style={styles.ttsBadgeText}>TTS</Text>
+        </View>
+      );
+    }
+    if (badge.type === 'imageGen') {
+      return (
+        <View key={key} style={styles.sttBadge}>
+          <Icon name="image" size={10} color="#3fb950" />
+          <Text style={styles.sttBadgeText}>IMG</Text>
+        </View>
+      );
+    }
+    // anyToAny
+    return (
+      <View key={key} style={styles.anyBadge}>
+        <Icon name="all-inclusive" size={10} color="#d2a8ff" />
+        <Text style={styles.anyBadgeText}>ANY→ANY</Text>
+      </View>
+    );
+  });
+}
+
+/** Mantida para compatibilidade onde só temos o modelId (não o ModelEntry). */
 function renderBadges(
   modelId: string,
   styles: ReturnType<typeof getStyles>,
@@ -136,12 +220,13 @@ function renderBadges(
   });
 }
 
-/** Gera badges visíveis para imageGen + as capabilities do getModelBadges. */
+/** Gera badges visíveis para imageGen + as capabilities do model. */
 function renderAllBadges(
   model: ModelEntry,
   styles: ReturnType<typeof getStyles>,
 ): React.ReactNode {
-  const capBadges = renderBadges(model.modelId, styles);
+  // Usa o novo helper que respeita os campos do ModelEntry
+  const capBadges = renderBadgesFromModel(model, styles);
   const imageBadge =
     model.isImageGen || model.modelId.toLowerCase().includes('image') ? (
       <View key="imagegen" style={styles.sttBadge}>
@@ -351,17 +436,14 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     ? getServer(settingsV2.ttsServerId)
     : activeServer;
 
-  // Modelos do servidor ativo (chat/LLM) — apenas visíveis E favoritos
-  // E que NÃO são STT/TTS (esses aparecem nos cards de Voz).
-  // Image gen também é excluído (aparece no card de Image Gen).
-  const serverModels: ModelEntry[] = activeServerId
-    ? getModelsByServer(activeServerId).filter(
-      m => !m.isHidden && !m.isUserHidden && m.isFavorite && !m.isStt && !m.isTts && !m.isImageGen,
-    )
-    : [];
-
-  // Modelos STT de todos os servidores — apenas favoritos para seleção
+  // Modelos de LLM (chat) — favoritos de TODOS os servidores, não só o ativo.
+  // Exclui STT/TTS/imageGen (esses aparecem nos cards de Voz e Image Gen).
   const allModels: ModelEntry[] = getAllModels();
+  const serverModels: ModelEntry[] = allModels.filter(
+    m => !m.isHidden && !m.isUserHidden && m.isFavorite && !m.isStt && !m.isTts && !m.isImageGen,
+  );
+
+  // Modelos STT/TTS de todos os servidores — apenas favoritos para seleção
   const sttModels: ModelEntry[] = allModels.filter(
     m => m.isStt === true && !m.isHidden && !m.isUserHidden && m.isFavorite,
   );
@@ -390,11 +472,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
 
   const selectServer = (server: ServerEntry) => {
     setServerDropdownOpen(false);
-    onChangeV2({activeServerId: server.id, activeModelId: null});
+    onChangeV2({activeServerId: server.id});
   };
 
   const selectModel = (model: ModelEntry) => {
-    onChangeV2({activeModelId: model.id});
+    // Ao selecionar um modelo, also troca o servidor ativo para o do modelo
+    onChangeV2({activeModelId: model.id, activeServerId: model.serverId});
   };
 
   const selectSttModel = (model: ModelEntry) => {
@@ -843,21 +926,18 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
               </Text>
             )}
 
-            {/* Lista de modelos do servidor ativo */}
+            {/* Lista de modelos favoritos (todos os servidores) */}
             <Text style={s.label}>Modelo</Text>
-            {!activeServerId ? (
+            {sortedServerModels.length === 0 ? (
               <Text style={s.hint}>
-                Selecione um servidor acima para ver os favoritos.
-              </Text>
-            ) : sortedServerModels.length === 0 ? (
-              <Text style={s.hint}>
-                Nenhum favorito neste servidor. Vá em Servidores e marque
-                modelos com a estrela para vê-los aqui.
+                Nenhum favorito. Vá em Servidores e marque modelos com a
+                estrela para vê-los aqui.
               </Text>
             ) : (
               <View style={s.dropdownList}>
                 {sortedServerModels.map(model => {
                   const isActive = model.id === settingsV2.activeModelId;
+                  const modelServer = getServer(model.serverId);
                   return (
                     <TouchableOpacity
                       key={model.id}
@@ -879,6 +959,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                           ]}
                           numberOfLines={1}>
                           {modelDisplayName(model)}
+                          {modelServer ? ` · ${modelServer.name}` : ''}
                         </Text>
                         {/* badges inline */}
                         <View
