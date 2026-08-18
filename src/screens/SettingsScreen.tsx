@@ -432,6 +432,11 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const [keyTick, setKeyTick] = useState(0);
   const refreshKeys = () => setKeyTick(t => t + 1);
 
+  // Estado para renomear key
+  const [renameKeyServer, setRenameKeyServer] = useState<ServerEntry | null>(null);
+  const [renameKeyIndex, setRenameKeyIndex] = useState(0);
+  const [renameKeyValue, setRenameKeyValue] = useState('');
+
   // --- Dados (síncronos, MMKV) ---
 
   const allServers: ServerEntry[] = getAllServers();
@@ -489,11 +494,14 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   };
 
   const selectSttModel = (model: ModelEntry) => {
-    onChangeV2({activeSttModelId: model.id});
+    // Troca também o servidor STT para o servidor do modelo selecionado,
+    // para que o App.tsx/useWhisper resolvam o servidor correto.
+    onChangeV2({activeSttModelId: model.id, sttServerId: model.serverId});
   };
 
   const selectTtsModel = (model: ModelEntry) => {
-    onChangeV2({activeTtsModelId: model.id});
+    // Troca também o servidor TTS para o servidor do modelo selecionado.
+    onChangeV2({activeTtsModelId: model.id, ttsServerId: model.serverId});
   };
 
   const selectSttServer = (serverId: string | null) => {
@@ -610,6 +618,24 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const handleSetRotation = (server: ServerEntry, rotation: 'single' | 'round-robin' | 'failover') => {
     patchServer(server.id, {keyRotation: rotation});
     clearServerCooldown(server.id);
+    refreshKeys();
+  };
+
+  /** Define o cooldown (em minutos) para o modo failover. */
+  const handleSetCooldown = (server: ServerEntry, minutes: number) => {
+    patchServer(server.id, {cooldownMinutes: minutes});
+    clearServerCooldown(server.id);
+    refreshKeys();
+  };
+
+  /** Salva o nome amigável de uma key. */
+  const handleRenameKey = (server: ServerEntry, keyIndex: number, label: string) => {
+    const labels = [...(server.keyLabels ?? [])];
+    // Preenche com null até o índice se necessário
+    while (labels.length < keyIndex) labels.push('');
+    labels[keyIndex] = label.trim();
+    patchServer(server.id, {keyLabels: labels});
+    setRenameKeyServer(null);
     refreshKeys();
   };
 
@@ -952,57 +978,94 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                                     </Text>
                                   </TouchableOpacity>
                                 );
-                              })}
-                            </View>
+                              })};
+                              </View>
 
-                            {/* Lista de keys — relê server do MMKV para refletir troca de ativa */}
-                            {(() => {
+                              {/* Cooldown customizável (só visível em failover) */}
+                              {(() => {
+                              const curRot = (getServer(server.id) ?? server).keyRotation;
+                              if (curRot !== 'failover') return null;
+                              const curServer = getServer(server.id) ?? server;
+                              const curMin = curServer.cooldownMinutes ?? 1;
+                              return (
+                              <View style={s.keyCooldownRow}>
+                              <Text style={s.keyLabel}>Cooldown (min)</Text>
+                              {[1, 3, 5, 10, 30].map(m => {
+                              const isSelected = curMin === m;
+                              return (
+                              <TouchableOpacity
+                                key={m}
+                                style={[s.keyCooldownBtn, isSelected && s.keyRotationBtnActive]}
+                                onPress={() => handleSetCooldown(curServer, m)}>
+                                <Text style={[s.keyCooldownText, isSelected && s.keyRotationTextActive]}>
+                                  {m}
+                                </Text>
+                              </TouchableOpacity>
+                              );
+                              })}
+                              </View>
+                              );
+                              })()}
+
+                              {/* Lista de keys — relê server do MMKV para refletir troca de ativa */}
+                              {(() => {
                               const currentServer = getServer(server.id) ?? server;
                               return Array.from({length: currentServer.apiKeyCount}).map((_, idx) => {
                               const isActiveNow = idx === currentServer.activeKeyIndex;
-                              const exhausted = isKeyExhausted(currentServer.id, idx);
+                              const cooldownMs = Math.max(1, currentServer.cooldownMinutes ?? 1) * 60_000;
+                              const exhausted = isKeyExhausted(currentServer.id, idx, cooldownMs);
+                              const label = currentServer.keyLabels?.[idx];
                               return (
-                                <View key={idx} style={[s.keyRow, isActiveNow && s.keyRowActive]}>
-                                  <Icon
-                                    name="vpn-key"
-                                    size={16}
-                                    color={isActiveNow ? theme.accent : theme.textMuted}
-                                  />
-                                  <Text style={s.keyLabel}>
-                                    Chave #{idx + 1}
-                                  </Text>
-                                  {isActiveNow && (
-                                    <View style={s.keyActiveBadge}>
-                                      <Text style={s.keyActiveBadgeText}>ATIVA</Text>
-                                    </View>
-                                  )}
-                                  {exhausted && (
-                                    <View style={s.keyCooldownBadge}>
-                                      <Text style={s.keyCooldownBadgeText}>COOLDOWN</Text>
-                                    </View>
-                                  )}
-                                  {/* Trocar para ativa (manual) */}
-                                  {!isActiveNow && (
-                                    <TouchableOpacity
-                                      style={s.keyActionBtn}
-                                      onPress={() => handleSetActiveKey(currentServer, idx)}
-                                      hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
-                                      <Icon name="swap-vert" size={18} color={theme.accent} />
-                                    </TouchableOpacity>
-                                  )}
-                                  {/* Remover */}
-                                  {currentServer.apiKeyCount > 1 && (
-                                    <TouchableOpacity
-                                      style={s.keyActionBtn}
-                                      onPress={() => handleRemoveKey(currentServer, idx)}
-                                      hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
-                                      <Icon name="delete" size={16} color={theme.errorText} />
-                                    </TouchableOpacity>
-                                  )}
-                                </View>
+                              <View key={idx} style={[s.keyRow, isActiveNow && s.keyRowActive]}>
+                              <Icon
+                              name="vpn-key"
+                              size={16}
+                              color={isActiveNow ? theme.accent : theme.textMuted}
+                              />
+                              <View style={{flex: 1}}>
+                              <Text style={s.keyLabel} numberOfLines={1}>
+                              {label ? label : `Chave #${idx + 1}`}
+                              </Text>
+                              </View>
+                              {isActiveNow && (
+                              <View style={s.keyActiveBadge}>
+                              <Text style={s.keyActiveBadgeText}>ATIVA</Text>
+                              </View>
+                              )}
+                              {exhausted && (
+                              <View style={s.keyCooldownBadge}>
+                              <Text style={s.keyCooldownBadgeText}>COOLDOWN</Text>
+                              </View>
+                              )}
+                              {/* Renomear */}
+                              <TouchableOpacity
+                              style={s.keyActionBtn}
+                              onPress={() => { setRenameKeyServer(currentServer); setRenameKeyIndex(idx); setRenameKeyValue(label ?? ''); }}
+                              hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
+                              <Icon name="edit" size={16} color={theme.textSecondary} />
+                              </TouchableOpacity>
+                              {/* Trocar para ativa (manual) */}
+                              {!isActiveNow && (
+                              <TouchableOpacity
+                              style={s.keyActionBtn}
+                              onPress={() => handleSetActiveKey(currentServer, idx)}
+                              hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
+                              <Icon name="swap-vert" size={18} color={theme.accent} />
+                              </TouchableOpacity>
+                              )}
+                              {/* Remover */}
+                              {currentServer.apiKeyCount > 1 && (
+                              <TouchableOpacity
+                              style={s.keyActionBtn}
+                              onPress={() => handleRemoveKey(currentServer, idx)}
+                              hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
+                              <Icon name="delete" size={16} color={theme.errorText} />
+                              </TouchableOpacity>
+                              )}
+                              </View>
                               );
                               });
-                            })()}
+                              })()}
 
                             {/* Botão adicionar chave */}
                             <TouchableOpacity
@@ -1804,6 +1867,48 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
           </View>
         </Modal>
 
+        {/* ====================================================== */}
+        {/* Modal: Renomear API key                                  */}
+        {/* ====================================================== */}
+        <Modal
+          visible={renameKeyServer !== null}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setRenameKeyServer(null)}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalCard}>
+              <Text style={s.modalTitle} numberOfLines={1}>
+                Renomear Chave #{renameKeyIndex + 1}
+              </Text>
+              <Text style={s.modalSubtitle}>
+                {renameKeyServer?.name ?? 'Servidor'}
+              </Text>
+              <TextInput
+                style={[s.input, {marginTop: 8}]}
+                value={renameKeyValue}
+                onChangeText={setRenameKeyValue}
+                placeholder="Ex: Gemini Pro, Conta trabalho..."
+                placeholderTextColor={theme.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={40}
+              />
+              <View style={s.modalActions}>
+                <TouchableOpacity
+                  style={[s.modalBtn, s.modalBtnCancel]}
+                  onPress={() => setRenameKeyServer(null)}>
+                  <Text style={s.modalBtnText}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.modalBtn, s.modalBtnSave]}
+                  onPress={() => renameKeyServer && handleRenameKey(renameKeyServer, renameKeyIndex, renameKeyValue)}>
+                  <Text style={s.modalBtnTextSave}>Salvar</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     </View>
   );
@@ -2435,6 +2540,28 @@ function getStyles(t: ThemeColors) {
     },
     keyActionBtn: {
       padding: 4,
+    },
+    // Cooldown selector (failover only)
+    keyCooldownRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 10,
+      marginTop: 4,
+      flexWrap: 'wrap',
+    },
+    keyCooldownBtn: {
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+      borderRadius: 8,
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    keyCooldownText: {
+      color: t.textSecondary,
+      fontSize: 12,
+      fontWeight: '600',
     },
   });
 }

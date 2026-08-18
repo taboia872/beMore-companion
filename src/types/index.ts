@@ -62,6 +62,8 @@ export interface ServerEntry {
   apiKeyCount: number;             // Quantas keys cadastradas (0 = sem key, ex: Ollama local)
   keyRotation: KeyRotationStrategy; // Como alternar entre keys
   activeKeyIndex: number;          // Qual key está em uso agora (0-based)
+  keyLabels?: string[];            // Nomes amigáveis para cada key (opcional, por índice)
+  cooldownMinutes?: number;         // Minutos de cooldown para failover (default 1)
   // Metadata
   createdAt: number;               // Date.now()
   updatedAt: number;

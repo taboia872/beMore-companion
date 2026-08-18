@@ -20,6 +20,8 @@ const exhaustedKeys = new Map<string, number>();
 
 const COOLDOWN_MS = 60_000; // 60 segundos
 
+const DEFAULT_COOLDOWN_MS = 60_000; // 60 segundos (1 min)
+
 /**
  * Retorna a API key a usar para a próxima requisição ao servidor.
  *
@@ -44,7 +46,7 @@ export async function getKeyForRequest(
       // Procura primeira key não-exhausted a partir do índice ativo
       for (let i = 0; i < server.apiKeyCount; i++) {
         const idx = (server.activeKeyIndex + i) % server.apiKeyCount;
-        if (!isKeyExhausted(server.id, idx)) {
+        if (!isKeyExhausted(server.id, idx, getCooldownMs(server))) {
           if (idx !== server.activeKeyIndex) {
             saveServer({...server, activeKeyIndex: idx});
           }
@@ -59,12 +61,19 @@ export async function getKeyForRequest(
   }
 }
 
+/** Retorna o cooldown em ms para um servidor (default 60s = 1 min). */
+function getCooldownMs(server: ServerEntry): number {
+  const minutes = server.cooldownMinutes ?? 1;
+  return Math.max(1, minutes) * 60_000;
+}
+
 /**
  * Verifica se uma key está em cooldown (exhausted).
  */
 export function isKeyExhausted(
   serverId: string,
   keyIndex: number,
+  cooldownMs: number = DEFAULT_COOLDOWN_MS,
 ): boolean {
   const key = `${serverId}-${keyIndex}`;
   const at = exhaustedKeys.get(key);

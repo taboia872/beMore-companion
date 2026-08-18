@@ -276,14 +276,6 @@ export const SERVER_PRESETS: ServerPreset[] = [
     description: 'LPU ultra-rápido. Llama, Mixtral, Whisper STT — free sem cartão',
   },
   {
-    name: 'Cerebras',
-    url: 'https://api.cerebras.ai/v1',
-    icon: 'memory',
-    format: 'openai',
-    hasFreeModels: true,
-    description: '1M tokens/dia free. Llama 3.1, Qwen — inference ultra-rápido',
-  },
-  {
     name: 'SambaNova',
     url: 'https://api.sambanova.ai/v1',
     icon: 'developer-board',
