@@ -33,9 +33,11 @@ import {
 import {loadSettingsV2, patchSettingsV2} from '../data/appSettings';
 import {shortModelName, displayModelName} from '../utils/modelName';
 import {fetchModels} from '../services/ServerService';
-import {loadApiKey} from '../data/keychainDb';
+import {loadApiKey, saveApiKey, resetApiKey} from '../data/keychainDb';
+import {patchServer} from '../data/serverDb';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 import {getAvailableVoices, testVoice, stopSpeaking} from '../services/TtsService';
+import {isKeyExhausted, clearServerCooldown} from '../services/KeyRotation';
 import {getTheme, ThemeColors} from '../utils/theme';
 
 /**
@@ -424,6 +426,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   // Estado para seção de modelos ocultos (por servidor)
   const [expandedHiddenId, setExpandedHiddenId] = useState<string | null>(null);
 
+  // Estado para gerenciamento de API keys
+  const [keyModalServer, setKeyModalServer] = useState<ServerEntry | null>(null);
+  const [newKeyValue, setNewKeyValue] = useState('');
+  const [keyTick, setKeyTick] = useState(0);
+  const refreshKeys = () => setKeyTick(t => t + 1);
+
   // --- Dados (síncronos, MMKV) ---
 
   const allServers: ServerEntry[] = getAllServers();
@@ -530,6 +538,79 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     patchModel(model.id, caps);
     refreshFav();
     setEditingModel(null);
+  };
+
+  /** Adiciona uma nova API key a um servidor. */
+  const handleAddKey = async (server: ServerEntry) => {
+    const key = newKeyValue.trim();
+    if (!key) {
+      Alert.alert('Chave vazia', 'Digite uma API key válida.');
+      return;
+    }
+    const newIndex = server.apiKeyCount;
+    await saveApiKey(server.id, newIndex, key);
+    patchServer(server.id, {
+      apiKeyCount: newIndex + 1,
+      activeKeyIndex: newIndex === 0 ? 0 : server.activeKeyIndex,
+    });
+    setNewKeyValue('');
+    setKeyModalServer(null);
+    refreshKeys();
+    refreshFav();
+  };
+
+  /** Remove uma API key de um servidor. */
+  const handleRemoveKey = async (server: ServerEntry, keyIndex: number) => {
+    if (server.apiKeyCount <= 1) {
+      Alert.alert(
+        'Não é possível remover',
+        'O servidor precisa de pelo menos uma chave. Edite a chave em vez de remover.',
+      );
+      return;
+    }
+    Alert.alert(
+      `Remover chave #${keyIndex + 1}?`,
+      'A chave será removida permanentemente do dispositivo.',
+      [
+        {text: 'Cancelar', style: 'cancel'},
+        {
+          text: 'Remover',
+          style: 'destructive',
+          onPress: async () => {
+            await resetApiKey(server.id, keyIndex);
+            // Reindexa as chaves restantes: move keys > keyIndex uma posição para baixo
+            for (let i = keyIndex; i < server.apiKeyCount - 1; i++) {
+              const k = await loadApiKey(server.id, i + 1);
+              await saveApiKey(server.id, i, k);
+              await resetApiKey(server.id, i + 1);
+            }
+            const newCount = server.apiKeyCount - 1;
+            const newActive = Math.min(server.activeKeyIndex, newCount - 1);
+            patchServer(server.id, {
+              apiKeyCount: newCount,
+              activeKeyIndex: Math.max(0, newActive),
+            });
+            clearServerCooldown(server.id);
+            refreshKeys();
+            refreshFav();
+          },
+        },
+      ],
+    );
+  };
+
+  /** Troca a chave ativa manualmente. */
+  const handleSetActiveKey = (server: ServerEntry, keyIndex: number) => {
+    patchServer(server.id, {activeKeyIndex: keyIndex});
+    clearServerCooldown(server.id);
+    refreshKeys();
+  };
+
+  /** Troca a estratégia de rotação. */
+  const handleSetRotation = (server: ServerEntry, rotation: 'single' | 'round-robin' | 'failover') => {
+    patchServer(server.id, {keyRotation: rotation});
+    clearServerCooldown(server.id);
+    refreshKeys();
   };
 
   /** Busca vozes disponíveis do servidor TTS ativo. */
@@ -838,6 +919,99 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                             )}
                             <Text style={s.addServerBtnText}>Atualizar modelos</Text>
                           </TouchableOpacity>
+
+                          {/* --- API Keys --- */}
+                          <View style={s.keySection}>
+                            <Text style={s.keySectionTitle}>API Keys ({server.apiKeyCount})</Text>
+
+                            {/* Estratégia de rotação */}
+                            <Text style={s.keyLabel}>Rotação</Text>
+                            <View style={s.keyRotationRow}>
+                              {(['single', 'round-robin', 'failover'] as const).map(rot => {
+                                const currentRot = (getServer(server.id) ?? server).keyRotation;
+                                const isSelected = currentRot === rot;
+                                const labels: Record<typeof rot, string> = {
+                                  'single': 'Manual',
+                                  'round-robin': 'Round-robin',
+                                  'failover': 'Failover',
+                                };
+                                return (
+                                  <TouchableOpacity
+                                    key={rot}
+                                    style={[
+                                      s.keyRotationBtn,
+                                      isSelected && s.keyRotationBtnActive,
+                                    ]}
+                                    onPress={() => handleSetRotation(server, rot)}>
+                                    <Text
+                                      style={[
+                                        s.keyRotationText,
+                                        isSelected && s.keyRotationTextActive,
+                                      ]}>
+                                      {labels[rot]}
+                                    </Text>
+                                  </TouchableOpacity>
+                                );
+                              })}
+                            </View>
+
+                            {/* Lista de keys — relê server do MMKV para refletir troca de ativa */}
+                            {(() => {
+                              const currentServer = getServer(server.id) ?? server;
+                              return Array.from({length: currentServer.apiKeyCount}).map((_, idx) => {
+                              const isActiveNow = idx === currentServer.activeKeyIndex;
+                              const exhausted = isKeyExhausted(currentServer.id, idx);
+                              return (
+                                <View key={idx} style={[s.keyRow, isActiveNow && s.keyRowActive]}>
+                                  <Icon
+                                    name="vpn-key"
+                                    size={16}
+                                    color={isActiveNow ? theme.accent : theme.textMuted}
+                                  />
+                                  <Text style={s.keyLabel}>
+                                    Chave #{idx + 1}
+                                  </Text>
+                                  {isActiveNow && (
+                                    <View style={s.keyActiveBadge}>
+                                      <Text style={s.keyActiveBadgeText}>ATIVA</Text>
+                                    </View>
+                                  )}
+                                  {exhausted && (
+                                    <View style={s.keyCooldownBadge}>
+                                      <Text style={s.keyCooldownBadgeText}>COOLDOWN</Text>
+                                    </View>
+                                  )}
+                                  {/* Trocar para ativa (manual) */}
+                                  {!isActiveNow && (
+                                    <TouchableOpacity
+                                      style={s.keyActionBtn}
+                                      onPress={() => handleSetActiveKey(currentServer, idx)}
+                                      hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
+                                      <Icon name="swap-vert" size={18} color={theme.accent} />
+                                    </TouchableOpacity>
+                                  )}
+                                  {/* Remover */}
+                                  {currentServer.apiKeyCount > 1 && (
+                                    <TouchableOpacity
+                                      style={s.keyActionBtn}
+                                      onPress={() => handleRemoveKey(currentServer, idx)}
+                                      hitSlop={{top: 8, bottom: 8, left: 4, right: 4}}>
+                                      <Icon name="delete" size={16} color={theme.errorText} />
+                                    </TouchableOpacity>
+                                  )}
+                                </View>
+                              );
+                              });
+                            })()}
+
+                            {/* Botão adicionar chave */}
+                            <TouchableOpacity
+                              style={[s.addServerBtn, {marginTop: 6}]}
+                              onPress={() => { setKeyModalServer(server); setNewKeyValue(''); }}>
+                              <Icon name="add" size={16} color={theme.accentText} />
+                              <Text style={s.addServerBtnText}>Adicionar chave</Text>
+                            </TouchableOpacity>
+                          </View>
                         </View>
                       )}
                     </View>
@@ -1588,6 +1762,48 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
           </View>
         </Modal>
 
+        {/* ====================================================== */}
+        {/* Modal: Adicionar API key                                 */}
+        {/* ====================================================== */}
+        <Modal
+          visible={keyModalServer !== null}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => { setKeyModalServer(null); setNewKeyValue(''); }}>
+          <View style={s.modalOverlay}>
+            <View style={s.modalCard}>
+              <Text style={s.modalTitle} numberOfLines={1}>
+                {keyModalServer?.name ?? 'Servidor'}
+              </Text>
+              <Text style={s.modalSubtitle}>
+                Adicionar nova API key:
+              </Text>
+              <TextInput
+                style={[s.input, {marginTop: 8}]}
+                value={newKeyValue}
+                onChangeText={setNewKeyValue}
+                placeholder="sk-... / AIza..."
+                placeholderTextColor={theme.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+              />
+              <View style={s.modalActions}>
+                <TouchableOpacity
+                  style={[s.modalBtn, s.modalBtnCancel]}
+                  onPress={() => { setKeyModalServer(null); setNewKeyValue(''); }}>
+                  <Text style={s.modalBtnText}>Cancelar</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[s.modalBtn, s.modalBtnSave]}
+                  onPress={() => keyModalServer && handleAddKey(keyModalServer)}>
+                  <Text style={s.modalBtnTextSave}>Adicionar</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     </View>
   );
@@ -2135,6 +2351,90 @@ function getStyles(t: ThemeColors) {
       color: t.accentText,
       fontSize: 14,
       fontWeight: '600',
+    },
+    // --- API Keys management ---
+    keySection: {
+      marginTop: 10,
+      paddingTop: 10,
+      borderTopWidth: 1,
+      borderTopColor: t.border,
+    },
+    keySectionTitle: {
+      color: t.textSecondary,
+      fontSize: 13,
+      fontWeight: '700',
+      marginBottom: 8,
+    },
+    keyLabel: {
+      color: t.text,
+      fontSize: 13,
+      flex: 1,
+    },
+    keyRotationRow: {
+      flexDirection: 'row',
+      gap: 6,
+      marginBottom: 10,
+    },
+    keyRotationBtn: {
+      flex: 1,
+      paddingVertical: 8,
+      borderRadius: 8,
+      alignItems: 'center',
+      backgroundColor: t.bg,
+      borderWidth: 1,
+      borderColor: t.border,
+    },
+    keyRotationBtnActive: {
+      backgroundColor: t.accent,
+      borderColor: t.accent,
+    },
+    keyRotationText: {
+      color: t.textSecondary,
+      fontSize: 12,
+      fontWeight: '600',
+    },
+    keyRotationTextActive: {
+      color: t.accentText,
+    },
+    keyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 10,
+      paddingHorizontal: 8,
+      borderRadius: 8,
+      backgroundColor: t.bg,
+      marginBottom: 4,
+    },
+    keyRowActive: {
+      backgroundColor: t.accent + '15',
+      borderWidth: 1,
+      borderColor: t.accent + '40',
+    },
+    keyActiveBadge: {
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      backgroundColor: '#3fb950',
+    },
+    keyActiveBadgeText: {
+      color: '#fff',
+      fontSize: 9,
+      fontWeight: '700',
+    },
+    keyCooldownBadge: {
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: 4,
+      backgroundColor: '#f0883e',
+    },
+    keyCooldownBadgeText: {
+      color: '#fff',
+      fontSize: 9,
+      fontWeight: '700',
+    },
+    keyActionBtn: {
+      padding: 4,
     },
   });
 }
