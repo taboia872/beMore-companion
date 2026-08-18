@@ -998,8 +998,8 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                                     </Text>
                                   </TouchableOpacity>
                                 );
-                              })};
-                              </View>
+                              })}
+                            </View>
 
                               {/* Cooldown customizável (só visível em failover) */}
                               {(() => {

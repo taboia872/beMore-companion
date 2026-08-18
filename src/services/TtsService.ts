@@ -58,7 +58,7 @@ function isFishAudio(baseUrl: string): boolean {
  * Constrói a URL completa do endpoint de síntese.
  * OpenAI-compat: {baseUrl}/audio/speech
  * Gemini: {baseUrl}/models/{model}:generateContent (auth via header, não query)
- * FishAudio: {baseUrl}/tts
+ * FishAudio: {baseUrl}/tts (remove /tts se já estiver na baseUrl)
  */
 function buildSpeechUrl(baseUrl: string, model: string): string {
   const clean = baseUrl.trim().replace(/\/+$/, '');
@@ -66,6 +66,8 @@ function buildSpeechUrl(baseUrl: string, model: string): string {
     return `${clean}/models/${model}:generateContent`;
   }
   if (isFishAudio(clean)) {
+    // Se o usuário cadastrou com /tts no final, não duplica
+    if (clean.endsWith('/tts')) return clean;
     return `${clean}/tts`;
   }
   return `${clean}/audio/speech`;
@@ -121,7 +123,8 @@ export async function fetchFishAudioVoices(
 ): Promise<FishAudioVoice[]> {
   const clean = baseUrl.trim().replace(/\/+$/, '');
   // Endpoint é /model (sem /v1) — raiz do domínio
-  const root = clean.replace(/\/v1$/, '');
+  // Remove /v1 e /tts se presentes (usuário pode ter cadastrado com ambos)
+  const root = clean.replace(/\/v1\/tts$/, '').replace(/\/tts$/, '').replace(/\/v1$/, '');
   const url = `${root}/model?page=${page}&page_size=${pageSize}`;
 
   const res = await fetch(url, {method: 'GET'});
