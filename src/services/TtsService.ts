@@ -48,14 +48,25 @@ function isGemini(baseUrl: string): boolean {
 }
 
 /**
+ * Detecta se a URL é do FishAudio (formato fishaudio).
+ */
+function isFishAudio(baseUrl: string): boolean {
+  return baseUrl.includes('fish.audio');
+}
+
+/**
  * Constrói a URL completa do endpoint de síntese.
  * OpenAI-compat: {baseUrl}/audio/speech
  * Gemini: {baseUrl}/models/{model}:generateContent (auth via header, não query)
+ * FishAudio: {baseUrl}/tts
  */
 function buildSpeechUrl(baseUrl: string, model: string): string {
   const clean = baseUrl.trim().replace(/\/+$/, '');
   if (isGemini(clean)) {
     return `${clean}/models/${model}:generateContent`;
+  }
+  if (isFishAudio(clean)) {
+    return `${clean}/tts`;
   }
   return `${clean}/audio/speech`;
 }
@@ -85,9 +96,52 @@ export const OPENAI_VOICES = [
 ] as const;
 
 /**
+ * Modelo TTS fixo do FishAudio (não há endpoint de listagem de modelos).
+ */
+export const FISHAUDIO_MODEL = 's2.1-pro-free';
+
+/**
+ * Interface para voz do FishAudio (retornada pelo GET /model).
+ */
+export interface FishAudioVoice {
+  id: string;        // _id — vai como reference_id no POST
+  title: string;     // nome amigável
+  languages: string[];
+}
+
+/**
+ * Busca vozes públicas do FishAudio via GET /model.
+ * Retorna array de {id, title, languages}.
+ * Paginação via query params page/page_size (default 20).
+ */
+export async function fetchFishAudioVoices(
+  baseUrl: string,
+  page = 1,
+  pageSize = 50,
+): Promise<FishAudioVoice[]> {
+  const clean = baseUrl.trim().replace(/\/+$/, '');
+  // Endpoint é /model (sem /v1) — raiz do domínio
+  const root = clean.replace(/\/v1$/, '');
+  const url = `${root}/model?page=${page}&page_size=${pageSize}`;
+
+  const res = await fetch(url, {method: 'GET'});
+  if (!res.ok) {
+    throw new Error(`FishAudio voices fetch failed: ${res.status}`);
+  }
+  const data = await res.json();
+  const items = data?.items ?? [];
+  return items.map((item: any) => ({
+    id: item._id ?? '',
+    title: item.title ?? 'Unknown',
+    languages: item.languages ?? [],
+  }));
+}
+
+/**
  * Retorna as vozes disponíveis conforme o provedor do servidor.
  * - Gemini: 30 vozes predefinidas (GEMINI_VOICES)
- * - OpenAI-compat (Groq, OpenAI, Cerebras, etc): 6 vozes padrão (OPENAI_VOICES)
+ * - OpenAI-compat (Groq, OpenAI, etc): 6 vozes padrão (OPENAI_VOICES)
+ * - FishAudio: retorna vazia (vozes são fetched async via fetchFishAudioVoices)
  *
  * Não há um endpoint de "listar vozes" na API OpenAI-compat — as vozes
  * são fixas por provedor. Esta função retorna a lista conhecida.
@@ -95,6 +149,9 @@ export const OPENAI_VOICES = [
 export function getAvailableVoices(baseUrl: string): string[] {
   if (isGemini(baseUrl)) {
     return [...GEMINI_VOICES];
+  }
+  if (isFishAudio(baseUrl)) {
+    return []; // FishAudio: vozes são fetched dinamicamente
   }
   return [...OPENAI_VOICES];
 }
@@ -229,9 +286,10 @@ export function speakText(params: TtsParams): Promise<void> {
   const truncatedInput = input.length > 4000 ? input.slice(0, 4000) : input;
 
   const gemini = isGemini(baseUrl);
+  const fish = isFishAudio(baseUrl);
   const url = buildSpeechUrl(baseUrl, model);
 
-  // Body difere entre Gemini e OpenAI-compat.
+  // Body difere entre Gemini, FishAudio e OpenAI-compat.
   const body = gemini
     ? JSON.stringify({
         contents: [{parts: [{text: truncatedInput}]}],
@@ -244,6 +302,12 @@ export function speakText(params: TtsParams): Promise<void> {
           },
         },
       })
+    : fish
+    ? JSON.stringify({
+        text: truncatedInput,
+        reference_id: voice || '',
+        format: 'mp3',
+      })
     : JSON.stringify({
         model,
         input: truncatedInput,
@@ -252,20 +316,24 @@ export function speakText(params: TtsParams): Promise<void> {
       });
 
   return new Promise<void>((resolve, reject) => {
-    // XHR: Gemini retorna JSON (responseType='text'), OpenAI-compat
+    // XHR: Gemini retorna JSON (responseType='text'), OpenAI-compat/FishAudio
     // retorna MP3 binário (responseType='base64' — extensão RN).
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
     // Gemini: responseType='text' para ler JSON diretamente.
-    // OpenAI-compat: responseType='base64' para obter MP3 binário.
+    // OpenAI-compat/FishAudio: responseType='base64' para obter MP3 binário.
     xhr.responseType = (gemini ? 'text' : 'base64') as any;
     xhr.setRequestHeader('Content-Type', 'application/json');
     // Gemini: header x-goog-api-key (FIX — antes usava ?key= query param,
     // mas Gemini passa a rejeitar sem header de Authorization para alguns
     // modelos/versões da API). OpenAI-compat: Bearer token.
+    // FishAudio: Bearer token + model no header.
     if (gemini && apiKey) {
       xhr.setRequestHeader('x-goog-api-key', apiKey);
-    } else if (!gemini && apiKey) {
+    } else if (fish && apiKey) {
+      xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
+      xhr.setRequestHeader('model', model);
+    } else if (!gemini && !fish && apiKey) {
       xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
     }
 

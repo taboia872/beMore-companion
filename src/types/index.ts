@@ -25,7 +25,7 @@ export interface LlmConfig {
  * - 'custom':      Mesma estrutura OpenAI, mas o usuário pode definir paths
  * - 'pollinations': GET-based image gen, sem API key, sem POST
  */
-export type ServerFormat = 'openai' | 'gemini' | 'ollama' | 'custom' | 'pollinations';
+export type ServerFormat = 'openai' | 'gemini' | 'ollama' | 'custom' | 'pollinations' | 'fishaudio';
 
 /**
  * Papel / capability que um modelo pode ter.

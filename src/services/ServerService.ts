@@ -216,6 +216,11 @@ export async function fetchModels(
   server: ServerEntry,
   apiKey: string,
 ): Promise<string[]> {
+  // FishAudio: não tem GET /models — retorna modelo fixo TTS
+  if (server.format === 'fishaudio') {
+    return ['s2.1-pro-free'];
+  }
+
   const {url, useHeader} = buildModelsUrl(server);
   const headers: Record<string, string> = {};
 
@@ -332,6 +337,15 @@ export const SERVER_PRESETS: ServerPreset[] = [
     format: 'ollama',
     hasFreeModels: true,
     description: 'Servidor local — modelos GGUF na sua máquina',
+  },
+  // --- TTS-only ---
+  {
+    name: 'FishAudio',
+    url: 'https://api.fish.audio/v1',
+    icon: 'graphic-eq',
+    format: 'fishaudio',
+    hasFreeModels: true,
+    description: 'TTS realista — 1000s de vozes da comunidade, modelo free s2.1-pro-free',
   },
 ];
 

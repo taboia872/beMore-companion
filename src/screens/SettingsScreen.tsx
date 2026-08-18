@@ -36,7 +36,7 @@ import {fetchModels} from '../services/ServerService';
 import {loadApiKey, saveApiKey, resetApiKey} from '../data/keychainDb';
 import {patchServer} from '../data/serverDb';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
-import {getAvailableVoices, testVoice, stopSpeaking} from '../services/TtsService';
+import {getAvailableVoices, testVoice, stopSpeaking, fetchFishAudioVoices} from '../services/TtsService';
 import {isKeyExhausted, clearServerCooldown} from '../services/KeyRotation';
 import {getTheme, ThemeColors} from '../utils/theme';
 
@@ -420,6 +420,10 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
   const [testingVoice, setTestingVoice] = useState<string | null>(null);
 
+  // Estado para vozes FishAudio (fetch async com title + id)
+  const [fishVoices, setFishVoices] = useState<{id: string; title: string; languages: string[]}[]>([]);
+  const [fishVoicesLoading, setFishVoicesLoading] = useState(false);
+
   // Estado para edição de capabilities de modelo
   const [editingModel, setEditingModel] = useState<ModelEntry | null>(null);
 
@@ -640,11 +644,27 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   };
 
   /** Busca vozes disponíveis do servidor TTS ativo. */
-  const handleFetchVoices = () => {
+  const handleFetchVoices = async () => {
     if (!ttsServer) {
       Alert.alert('Sem servidor', 'Selecione um servidor TTS primeiro.');
       return;
     }
+    // FishAudio: fetch async de vozes públicas via GET /model
+    if (ttsServer.baseUrl.includes('fish.audio')) {
+      setFishVoicesLoading(true);
+      setTtsVoices([]); // limpa lista fixa
+      try {
+        const voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
+        setFishVoices(voices);
+      } catch (e: any) {
+        Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a URL do servidor.');
+      } finally {
+        setFishVoicesLoading(false);
+      }
+      return;
+    }
+    // OpenAI/Gemini: vozes fixas
+    setFishVoices([]);
     const voices = getAvailableVoices(ttsServer.baseUrl);
     setTtsVoices(voices);
   };
@@ -1608,7 +1628,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
               uma voz para testar e definir.
             </Text>
 
-            {/* Lista de vozes com botão de teste */}
+            {/* Lista de vozes com botão de teste (OpenAI/Gemini — fixas) */}
             {ttsVoices.length > 0 && (
               <View style={s.dropdownList}>
                 {ttsVoices.map(voice => {
@@ -1639,6 +1659,66 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                       <TouchableOpacity
                         style={s.favBtn}
                         onPress={() => handleTestVoice(voice)}
+                        disabled={isTesting || !ttsServer || !activeTtsModel}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                        {isTesting ? (
+                          <ActivityIndicator size={16} color={theme.accent} />
+                        ) : (
+                          <Icon name="play-arrow" size={20} color={theme.accent} />
+                        )}
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Loading de vozes FishAudio */}
+            {fishVoicesLoading && (
+              <View style={{flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8}}>
+                <ActivityIndicator size={16} color={theme.accent} />
+                <Text style={s.hint}>Buscando vozes do FishAudio...</Text>
+              </View>
+            )}
+
+            {/* Lista de vozes FishAudio (fetch async — title + id) */}
+            {fishVoices.length > 0 && (
+              <View style={s.dropdownList}>
+                {fishVoices.map(fv => {
+                  const isActive = fv.id === (settingsV2.ttsVoice ?? '');
+                  const isTesting = testingVoice === fv.id;
+                  return (
+                    <View
+                      key={fv.id}
+                      style={[s.dropdownItem, isActive && s.dropdownItemActive]}>
+                      <TouchableOpacity
+                        style={{flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8}}
+                        onPress={() => onChangeV2({ttsVoice: fv.id})}>
+                        <Icon
+                          name={isActive ? 'check-circle' : 'radio-button-unchecked'}
+                          size={18}
+                          color={isActive ? '#3fb950' : theme.textSecondary}
+                        />
+                        <View style={{flex: 1}}>
+                          <Text
+                            style={[
+                              s.dropdownItemText,
+                              isActive && s.dropdownItemTextActive,
+                            ]}
+                            numberOfLines={1}>
+                            {fv.title}
+                          </Text>
+                          {fv.languages && fv.languages.length > 0 && (
+                            <Text style={s.hint} numberOfLines={1}>
+                              {fv.languages.join(', ')}
+                            </Text>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                      {/* Botão de teste */}
+                      <TouchableOpacity
+                        style={s.favBtn}
+                        onPress={() => handleTestVoice(fv.id)}
                         disabled={isTesting || !ttsServer || !activeTtsModel}
                         hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
                         {isTesting ? (

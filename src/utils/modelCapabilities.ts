@@ -70,6 +70,8 @@ const TTS_PATTERNS: string[] = [
   'lacqo',
   'kokoro', // kokoro-tts
   'fish-speech',
+  'fish', // fish.audio s2.1-pro-free
+  's2.1', // FishAudio s2.1-pro-free
   'f5-tts',
   'e2-tts',
   'speech',
