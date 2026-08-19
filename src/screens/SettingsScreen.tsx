@@ -37,6 +37,12 @@ import {loadApiKey, saveApiKey, resetApiKey} from '../data/keychainDb';
 import {patchServer} from '../data/serverDb';
 import {getModelBadges, ModelCapability} from '../utils/modelCapabilities';
 import {getAvailableVoices, testVoice, stopSpeaking, fetchFishAudioVoices} from '../services/TtsService';
+import {
+  getFishVoices,
+  appendFishVoices,
+  getFishVoicesLastPage,
+  clearFishVoices,
+} from '../data/voiceDb';
 import {isKeyExhausted, clearServerCooldown} from '../services/KeyRotation';
 import {getTheme, ThemeColors} from '../utils/theme';
 
@@ -399,9 +405,10 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const s = getStyles(theme);
 
   // Drop downs abertos
-  const [serverDropdownOpen, setServerDropdownOpen] = useState(false);
-  const [sttServerDropdownOpen, setSttServerDropdownOpen] = useState(false);
-  const [ttsServerDropdownOpen, setTtsServerDropdownOpen] = useState(false);
+  // serverDropdownOpen, sttServerDropdownOpen e ttsServerDropdownOpen removidos:
+  // os modais de servidor ativo/STT/TTS não existem mais na UI.
+  // A seleção de servidor é implícita ao selecionar o modelo (selectModel,
+  // selectSttModel, selectTtsModel setam o serverId correspondente).
 
   // Estado de loading p/ delete de servidor
   const [deleting, setDeleting] = useState(false);
@@ -423,6 +430,10 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   // Estado para vozes FishAudio (fetch async com title + id)
   const [fishVoices, setFishVoices] = useState<{id: string; title: string; languages: string[]}[]>([]);
   const [fishVoicesLoading, setFishVoicesLoading] = useState(false);
+  const [fishVoicesHasMore, setFishVoicesHasMore] = useState(false);
+  const [fishVoicesTotal, setFishVoicesTotal] = useState(0);
+  const [fishVoicesLoadingMore, setFishVoicesLoadingMore] = useState(false);
+  const [fishVoicesTick, setFishVoicesTick] = useState(0);
 
   // Estado para edição de capabilities de modelo
   const [editingModel, setEditingModel] = useState<ModelEntry | null>(null);
@@ -487,11 +498,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
 
   // --- Handlers ---
 
-  const selectServer = (server: ServerEntry) => {
-    setServerDropdownOpen(false);
-    onChangeV2({activeServerId: server.id});
-  };
-
   const selectModel = (model: ModelEntry) => {
     // Ao selecionar um modelo, also troca o servidor ativo para o do modelo
     onChangeV2({activeModelId: model.id, activeServerId: model.serverId});
@@ -506,16 +512,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const selectTtsModel = (model: ModelEntry) => {
     // Troca também o servidor TTS para o servidor do modelo selecionado.
     onChangeV2({activeTtsModelId: model.id, ttsServerId: model.serverId});
-  };
-
-  const selectSttServer = (serverId: string | null) => {
-    setSttServerDropdownOpen(false);
-    onChangeV2({sttServerId: serverId});
-  };
-
-  const selectTtsServer = (serverId: string | null) => {
-    setTtsServerDropdownOpen(false);
-    onChangeV2({ttsServerId: serverId});
   };
 
   /** Alterna favorito de um modelo (LLM, STT, TTS). */
@@ -643,7 +639,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     refreshKeys();
   };
 
-  /** Busca vozes disponíveis do servidor TTS ativo. */
+  /** Busca vozes disponíveis do servidor TTS ativo.
+   *  Para FishAudio: usa cache do MMKV (voiceDb) se já foi buscado antes.
+   *  Para OpenAI/Gemini: vozes são fixas (getAvailableVoices). */
   const handleFetchVoices = async () => {
     if (!ttsServer) {
       Alert.alert('Sem servidor', 'Selecione um servidor TTS primeiro.');
@@ -651,16 +649,32 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     }
     // FishAudio: fetch async de vozes públicas via GET /model
     if (ttsServer.baseUrl.includes('fish.audio')) {
+      // Se já há vozes no cache, mostra as cacheadas em vez de refazer fetch.
+      const cached = getFishVoices(ttsServer.id);
+      if (cached.length > 0) {
+        setFishVoices(cached);
+        // Se o cache não esgotou o total na última busca, mantém hasMore ativo
+        const lastPage = getFishVoicesLastPage(ttsServer.id);
+        // Sempre mostra o botão "Carregar mais" se já tem vozes no cache
+        // — o usuário pode querer paginar
+        setFishVoicesTick(t => t + 1);
+        return;
+      }
       setFishVoicesLoading(true);
       setTtsVoices([]); // limpa lista fixa
       try {
         // Busca vozes em português primeiro (filtro do FishAudio)
-        let voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50, 'pt');
+        let result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50, 'pt');
         // Se não há vozes em PT, busca sem filtro
-        if (voices.length === 0) {
-          voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
+        if (result.voices.length === 0) {
+          result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
         }
-        setFishVoices(voices);
+        // Salva no cache (página 1)
+        setFishVoices(result.voices);
+        setFishVoicesHasMore(result.hasMore);
+        setFishVoicesTotal(result.total);
+        appendFishVoices(ttsServer.id, result.voices, result.page);
+        setFishVoicesTick(t => t + 1);
       } catch (e: any) {
         Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a URL do servidor.');
       } finally {
@@ -670,8 +684,63 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     }
     // OpenAI/Gemini: vozes fixas
     setFishVoices([]);
+    setFishVoicesHasMore(false);
     const voices = getAvailableVoices(ttsServer.baseUrl);
     setTtsVoices(voices);
+  };
+
+  /** Carrega mais 50 vozes FishAudio (próxima página do cache/API). */
+  const handleLoadMoreVoices = async () => {
+    if (!ttsServer || fishVoicesLoadingMore) return;
+    setFishVoicesLoadingMore(true);
+    try {
+      const lastPage = getFishVoicesLastPage(ttsServer.id);
+      const nextPage = lastPage + 1;
+      // Primeiro verifica se já temos no cache (usuário pode ter paginado antes)
+      // Se a próxima página já está no cache, não precisa de fetch.
+      // Como armazenamos em um único array, não sabemos se a próxima página
+      // foi toda carregada. Verificamos se já temos o total ou se o cache
+      // já tem mais vozes que as mostradas.
+      const cached = getFishVoices(ttsServer.id);
+      if (cached.length > fishVoices.length) {
+        // Já temos mais no cache — apenas atualiza a UI
+        setFishVoices(cached);
+        setFishVoicesTick(t => t + 1);
+        return;
+      }
+      // Senão, busca a próxima página da API
+      let result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 50);
+      // Se PT retornou vazio na primeira vez, aqui também pode
+      // Mantém consistência com o handleFetchVoices
+      if (result.voices.length === 0 && nextPage === 2) {
+        result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 50);
+      }
+      if (result.voices.length > 0) {
+        const merged = appendFishVoices(ttsServer.id, result.voices, result.page);
+        setFishVoices(merged);
+        setFishVoicesHasMore(result.hasMore);
+        setFishVoicesTotal(result.total);
+        setFishVoicesTick(t => t + 1);
+      } else {
+        setFishVoicesHasMore(false);
+      }
+    } catch (e: any) {
+      Alert.alert('Erro ao carregar mais vozes', e?.message ?? 'Verifique a conexão.');
+    } finally {
+      setFishVoicesLoadingMore(false);
+    }
+  };
+
+  /** Limpa o cache de vozes FishAudio e refaz o fetch do zero. */
+  const handleRefreshVoices = async () => {
+    if (!ttsServer) return;
+    if (ttsServer.baseUrl.includes('fish.audio')) {
+      clearFishVoices(ttsServer.id);
+      setFishVoices([]);
+      setFishVoicesHasMore(false);
+      setFishVoicesTotal(0);
+      await handleFetchVoices();
+    }
   };
 
   /** Testa uma voz sintetizando uma frase curta. */
@@ -781,14 +850,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const activeTtsModel = settingsV2.activeTtsModelId
     ? getModel(settingsV2.activeTtsModelId)
     : null;
-
-  // Nome do servidor STT/TTS selecionado (ou "mesmo do chat")
-  const sttServerName = settingsV2.sttServerId
-    ? getServer(settingsV2.sttServerId)?.name ?? 'Servidor removido'
-    : 'Igual ao servidor de chat';
-  const ttsServerName = settingsV2.ttsServerId
-    ? getServer(settingsV2.ttsServerId)?.name ?? 'Servidor removido'
-    : 'Igual ao servidor de chat';
 
   return (
     <View style={s.overlay}>
@@ -1125,69 +1186,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
             icon="memory"
             defaultExpanded={false}
             theme={theme}>
-            {/* Dropdown de servidor ativo */}
-            <Text style={s.label}>Servidor ativo</Text>
-            <TouchableOpacity
-              style={s.dropdownBtn}
-              onPress={() => setServerDropdownOpen(v => !v)}>
-              <Icon
-                name={(activeServer?.icon ?? 'dns') as any}
-                size={20}
-                color={theme.accent}
-              />
-              <Text style={s.dropdownBtnText} numberOfLines={1}>
-                {activeServer?.name ?? 'Nenhum servidor selecionado'}
-              </Text>
-              <Icon
-                name={serverDropdownOpen ? 'expand-less' : 'expand-more'}
-                size={22}
-                color={theme.textSecondary}
-              />
-            </TouchableOpacity>
-
-            {serverDropdownOpen && (
-              <View style={s.dropdownList}>
-                {allServers.map(server => {
-                  const isActive = server.id === settingsV2.activeServerId;
-                  return (
-                    <TouchableOpacity
-                      key={server.id}
-                      style={[
-                        s.dropdownItem,
-                        isActive && s.dropdownItemActive,
-                      ]}
-                      onPress={() => selectServer(server)}>
-                      <Icon
-                        name={server.icon as any}
-                        size={18}
-                        color={isActive ? theme.accent : theme.textSecondary}
-                      />
-                      <Text
-                        style={[
-                          s.dropdownItemText,
-                          isActive && s.dropdownItemTextActive,
-                        ]}
-                        numberOfLines={1}>
-                        {server.name}
-                      </Text>
-                      {isActive && (
-                        <Icon name="check" size={18} color="#3fb950" />
-                      )}
-                    </TouchableOpacity>
-                  );
-                })}
-                {allServers.length === 0 && (
-                  <Text style={s.emptyText}>Nenhum servidor cadastrado.</Text>
-                )}
-              </View>
-            )}
-
-            {activeServer && (
-              <Text style={s.urlDisplay} numberOfLines={2}>
-                {activeServer.baseUrl}
-              </Text>
-            )}
-
             {/* Lista de modelos favoritos (todos os servidores) */}
             <Text style={s.label}>Modelo</Text>
             {sortedServerModels.length === 0 ? (
@@ -1274,100 +1272,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
           {/* Card: Voz (STT) — transcription online                   */}
           {/* ====================================================== */}
           <Card title="Voz (STT)" icon="mic" theme={theme}>
-            <Text style={s.hint}>
-              Transcrição via API online (Groq, OpenAI, etc). Escolha o
-              servidor e modelo STT abaixo.
-            </Text>
-
-            {/* Servidor STT (override) — null = mesmo do chat */}
-            <Text style={s.label}>Servidor STT</Text>
-                <TouchableOpacity
-                  style={s.dropdownBtn}
-                  onPress={() => setSttServerDropdownOpen(v => !v)}>
-                  <Icon
-                    name="cloud-queue"
-                    size={20}
-                    color={theme.accent}
-                  />
-                  <Text style={s.dropdownBtnText} numberOfLines={1}>
-                    {sttServerName}
-                  </Text>
-                  <Icon
-                    name={
-                      sttServerDropdownOpen ? 'expand-less' : 'expand-more'
-                    }
-                    size={22}
-                    color={theme.textSecondary}
-                  />
-                </TouchableOpacity>
-
-                {sttServerDropdownOpen && (
-                  <View style={s.dropdownList}>
-                    {/* Null = same as chat server */}
-                    <TouchableOpacity
-                      style={[
-                        s.dropdownItem,
-                        settingsV2.sttServerId === null &&
-                          s.dropdownItemActive,
-                      ]}
-                      onPress={() => selectSttServer(null)}>
-                      <Icon
-                        name="repeat"
-                        size={18}
-                        color={
-                          settingsV2.sttServerId === null
-                            ? theme.accent
-                            : theme.textSecondary
-                        }
-                      />
-                      <Text
-                        style={[
-                          s.dropdownItemText,
-                          settingsV2.sttServerId === null &&
-                            s.dropdownItemTextActive,
-                        ]}
-                        numberOfLines={1}>
-                        Igual ao servidor de chat
-                      </Text>
-                      {settingsV2.sttServerId === null && (
-                        <Icon name="check" size={18} color="#3fb950" />
-                      )}
-                    </TouchableOpacity>
-                    {allServers.map(server => {
-                      const isActive = server.id === settingsV2.sttServerId;
-                      return (
-                        <TouchableOpacity
-                          key={server.id}
-                          style={[
-                            s.dropdownItem,
-                            isActive && s.dropdownItemActive,
-                          ]}
-                          onPress={() => selectSttServer(server.id)}>
-                          <Icon
-                            name={server.icon as any}
-                            size={18}
-                            color={
-                              isActive ? theme.accent : theme.textSecondary
-                            }
-                          />
-                          <Text
-                            style={[
-                              s.dropdownItemText,
-                              isActive && s.dropdownItemTextActive,
-                            ]}
-                            numberOfLines={1}>
-                            {server.name}
-                          </Text>
-                          {isActive && (
-                            <Icon name="check" size={18} color="#3fb950" />
-                          )}
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                )}
-
-                {/* Lista de modelos STT (de todos os servidores) */}
+            {/* Lista de modelos STT (de todos os servidores) */}
                 <Text style={s.label}>Modelo STT online</Text>
                 {sortedSttModels.length === 0 ? (
                   <Text style={s.hint}>
@@ -1453,89 +1358,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
           {/* Card: Voz (TTS) — síntese de áudio                     */}
           {/* ====================================================== */}
           <Card title="Voz (TTS)" icon="volume-up" theme={theme}>
-            <Text style={s.hint}>
-              Síntese de voz via API online (Groq TTS, OpenAI TTS, etc). Escolha
-              o servidor e modelo TTS abaixo.
-            </Text>
-
-            {/* Servidor TTS (override) — null = mesmo do chat */}
-            <Text style={s.label}>Servidor TTS</Text>
-            <TouchableOpacity
-              style={s.dropdownBtn}
-              onPress={() => setTtsServerDropdownOpen(v => !v)}>
-              <Icon name="cloud-queue" size={20} color={theme.accent} />
-              <Text style={s.dropdownBtnText} numberOfLines={1}>
-                {ttsServerName}
-              </Text>
-              <Icon
-                name={ttsServerDropdownOpen ? 'expand-less' : 'expand-more'}
-                size={22}
-                color={theme.textSecondary}
-              />
-            </TouchableOpacity>
-
-            {ttsServerDropdownOpen && (
-              <View style={s.dropdownList}>
-                <TouchableOpacity
-                  style={[
-                    s.dropdownItem,
-                    settingsV2.ttsServerId === null && s.dropdownItemActive,
-                  ]}
-                  onPress={() => selectTtsServer(null)}>
-                  <Icon
-                    name="repeat"
-                    size={18}
-                    color={
-                      settingsV2.ttsServerId === null
-                        ? theme.accent
-                        : theme.textSecondary
-                    }
-                  />
-                  <Text
-                    style={[
-                      s.dropdownItemText,
-                      settingsV2.ttsServerId === null &&
-                        s.dropdownItemTextActive,
-                    ]}
-                    numberOfLines={1}>
-                    Igual ao servidor de chat
-                  </Text>
-                  {settingsV2.ttsServerId === null && (
-                    <Icon name="check" size={18} color="#3fb950" />
-                  )}
-                </TouchableOpacity>
-                {allServers.map(server => {
-                  const isActive = server.id === settingsV2.ttsServerId;
-                  return (
-                    <TouchableOpacity
-                      key={server.id}
-                      style={[
-                        s.dropdownItem,
-                        isActive && s.dropdownItemActive,
-                      ]}
-                      onPress={() => selectTtsServer(server.id)}>
-                      <Icon
-                        name={server.icon as any}
-                        size={18}
-                        color={isActive ? theme.accent : theme.textSecondary}
-                      />
-                      <Text
-                        style={[
-                          s.dropdownItemText,
-                          isActive && s.dropdownItemTextActive,
-                        ]}
-                        numberOfLines={1}>
-                        {server.name}
-                      </Text>
-                      {isActive && (
-                        <Icon name="check" size={18} color="#3fb950" />
-                      )}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            )}
-
             {/* Lista de modelos TTS (de todos os servidores) */}
             <Text style={s.label}>Modelo TTS</Text>
             {sortedTtsModels.length === 0 ? (
@@ -1618,19 +1440,31 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
 
             {/* Voz */}
             <Text style={s.label}>Voz</Text>
-            <TouchableOpacity
-              style={[s.dropdownBtn, {marginTop: 2}]}
-              onPress={handleFetchVoices}
-              disabled={!ttsServer || !activeTtsModel}>
-              <Icon name="record-voice-over" size={20} color={theme.accent} />
-              <Text style={s.dropdownBtnText} numberOfLines={1}>
-                {settingsV2.ttsVoice || 'Buscar vozes disponíveis'}
-              </Text>
-              <Icon name="refresh" size={18} color={theme.textSecondary} />
-            </TouchableOpacity>
+            <View style={{flexDirection: 'row', gap: 8, alignItems: 'center'}}>
+              <TouchableOpacity
+                style={[s.dropdownBtn, {marginTop: 2, flex: 1}]}
+                onPress={handleFetchVoices}
+                disabled={!ttsServer || !activeTtsModel}>
+                <Icon name="record-voice-over" size={20} color={theme.accent} />
+                <Text style={s.dropdownBtnText} numberOfLines={1}>
+                  {settingsV2.ttsVoice || 'Buscar vozes disponíveis'}
+                </Text>
+                <Icon name="expand-more" size={18} color={theme.textSecondary} />
+              </TouchableOpacity>
+              {/* Botão refresh — limpa cache e refaz fetch (FishAudio) */}
+              {ttsServer && ttsServer.baseUrl.includes('fish.audio') && fishVoices.length > 0 && (
+                <TouchableOpacity
+                  style={[s.favBtn, {marginTop: 2}]}
+                  onPress={handleRefreshVoices}
+                  disabled={fishVoicesLoading}
+                  hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                  <Icon name="refresh" size={20} color={theme.textSecondary} />
+                </TouchableOpacity>
+              )}
+            </View>
             <Text style={s.hint}>
-              Toque para carregar as vozes disponíveis do provedor. Selecione
-              uma voz para testar e definir.
+              Toque para carregar as vozes disponíveis. Selecione uma voz para
+              testar e definir.
             </Text>
 
             {/* Lista de vozes com botão de teste (OpenAI/Gemini — fixas) */}
@@ -1736,6 +1570,39 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                   );
                 })}
               </View>
+            )}
+
+            {/* Botão "Carregar mais 50 vozes" (FishAudio — paginação) */}
+            {fishVoices.length > 0 && ttsServer && ttsServer.baseUrl.includes('fish.audio') && (
+              <>
+                {fishVoicesTotal > 0 && (
+                  <Text style={[s.hint, {textAlign: 'center', marginVertical: 4}]}>
+                    {fishVoices.length} de {fishVoicesTotal} vozes
+                  </Text>
+                )}
+                {fishVoicesHasMore && (
+                  <TouchableOpacity
+                    style={[s.dropdownBtn, {marginTop: 4, justifyContent: 'center'}]}
+                    onPress={handleLoadMoreVoices}
+                    disabled={fishVoicesLoadingMore}>
+                    {fishVoicesLoadingMore ? (
+                      <>
+                        <ActivityIndicator size={16} color={theme.accent} />
+                        <Text style={[s.dropdownBtnText, {marginLeft: 8}]}>
+                          Carregando...
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Icon name="add" size={18} color={theme.accent} />
+                        <Text style={[s.dropdownBtnText, {marginLeft: 4}]}>
+                          Carregar mais 50 vozes
+                        </Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                )}
+              </>
             )}
           </Card>
 

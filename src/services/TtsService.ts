@@ -112,18 +112,30 @@ export interface FishAudioVoice {
 }
 
 /**
- /**
-  * Busca vozes públicas do FishAudio via GET /model.
-  * Retorna array de {id, title, languages}.
-  * @param language — filtro de idioma (ex: 'pt', 'en'). Se fornecido, retorna
-  *                   apenas vozes que suportam este idioma.
-  */
+ * Resultado da busca de vozes FishAudio — inclui total para paginação.
+ */
+export interface FishAudioVoicesResult {
+  voices: FishAudioVoice[];
+  /** Total de vozes disponíveis no servidor (para paginação). */
+  total: number;
+  /** Página que foi buscada. */
+  page: number;
+  /** Se true, há mais páginas para carregar. */
+  hasMore: boolean;
+}
+
+/**
+ * Busca vozes públicas do FishAudio via GET /model.
+ * Retorna array de {id, title, languages} + total para paginação.
+ * @param language — filtro de idioma (ex: 'pt', 'en'). Se fornecido, retorna
+ *                   apenas vozes que suportam este idioma.
+ */
 export async function fetchFishAudioVoices(
   baseUrl: string,
   page = 1,
   pageSize = 50,
   language?: string,
-): Promise<FishAudioVoice[]> {
+): Promise<FishAudioVoicesResult> {
   const clean = baseUrl.trim().replace(/\/+$/, '');
   // Remove /v1 e /tts se presentes (usuário pode ter cadastrado com ambos)
   const root = clean.replace(/\/v1\/tts$/, '').replace(/\/tts$/, '').replace(/\/v1$/, '');
@@ -138,11 +150,15 @@ export async function fetchFishAudioVoices(
   }
   const data = await res.json();
   const items = data?.items ?? [];
-  return items.map((item: any) => ({
+  const total = data?.total ?? items.length;
+  const voices: FishAudioVoice[] = items.map((item: any) => ({
     id: item._id ?? '',
     title: item.title ?? 'Unknown',
     languages: item.languages ?? [],
   }));
+  // hasMore = se a página atual não esgotou o total
+  const hasMore = page * pageSize < total;
+  return {voices, total, page, hasMore};
 }
 
 /**
