@@ -263,6 +263,82 @@ function uint8ToBase64(bytes: Uint8Array): string {
 }
 
 /**
+ * Sintetiza texto via FishAudio usando fetch (mais confiável para binário no RN).
+ * FishAudio: POST /tts com model no header, reference_id no body, retorna MP3.
+ */
+async function speakFishAudio(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  input: string,
+  voice: string,
+): Promise<void> {
+  const url = buildSpeechUrl(baseUrl, model);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    model,
+  };
+  if (apiKey) {
+    headers['Authorization'] = `Bearer ${apiKey}`;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        text: input,
+        reference_id: voice || '',
+        format: 'mp3',
+      }),
+    });
+  } catch (e) {
+    const msg = (e as Error)?.message ?? String(e);
+    if (msg.includes('Network') || msg.includes('network')) {
+      throw new Error('Sem internet ou servidor FishAudio indisponível.');
+    }
+    throw new Error(`Falha de rede: ${msg}`);
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('API Key inválida para FishAudio. Verifique nas configurações.');
+    }
+    if (response.status === 429) {
+      throw new Error('Muitas requisições. Aguarde um momento.');
+    }
+    let detail = '';
+    try {
+      const errText = await response.text();
+      detail = errText.slice(0, 200);
+    } catch { /* ignore */ }
+    throw new Error(`Erro FishAudio (${response.status}): ${detail}`);
+  }
+
+  // Resposta é MP3 binário — converter para base64 e salvar
+  const arrayBuffer = await response.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength === 0) {
+    throw new Error('FishAudio retornou áudio vazio.');
+  }
+
+  // Converte ArrayBuffer para base64 (btoa não existe no RN)
+  const bytes = new Uint8Array(arrayBuffer);
+  const base64 = uint8ToBase64(bytes);
+
+  const fileName = `tts_${Date.now()}.mp3`;
+  const audioPath = `${RNFS.CachesDirectoryPath}/${fileName}`;
+  await RNFS.writeFile(audioPath, base64, 'base64');
+
+  try {
+    await playAudioFile(audioPath);
+  } finally {
+    try { await RNFS.unlink(audioPath); } catch { /* no-op */ }
+  }
+}
+
+/**
  * Sintetiza texto em áudio via API online e toca o resultado.
  *
  * Detecta automaticamente o backend:
@@ -288,11 +364,15 @@ export function speakText(params: TtsParams): Promise<void> {
   // Limita texto para nao exceder limites da API (~4096 chars).
   const truncatedInput = input.length > 4000 ? input.slice(0, 4000) : input;
 
+  // FishAudio: usa fetch (mais confiável para binário no RN)
+  if (isFishAudio(baseUrl)) {
+    return speakFishAudio(baseUrl, apiKey, model, truncatedInput, voice || '');
+  }
+
   const gemini = isGemini(baseUrl);
-  const fish = isFishAudio(baseUrl);
   const url = buildSpeechUrl(baseUrl, model);
 
-  // Body difere entre Gemini, FishAudio e OpenAI-compat.
+  // Body difere entre Gemini e OpenAI-compat.
   const body = gemini
     ? JSON.stringify({
         contents: [{parts: [{text: truncatedInput}]}],
@@ -305,12 +385,6 @@ export function speakText(params: TtsParams): Promise<void> {
           },
         },
       })
-    : fish
-    ? JSON.stringify({
-        text: truncatedInput,
-        reference_id: voice || '',
-        format: 'mp3',
-      })
     : JSON.stringify({
         model,
         input: truncatedInput,
@@ -319,24 +393,15 @@ export function speakText(params: TtsParams): Promise<void> {
       });
 
   return new Promise<void>((resolve, reject) => {
-    // XHR: Gemini retorna JSON (responseType='text'), OpenAI-compat/FishAudio
+    // XHR: Gemini retorna JSON (responseType='text'), OpenAI-compat
     // retorna MP3 binário (responseType='base64' — extensão RN).
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
-    // Gemini: responseType='text' para ler JSON diretamente.
-    // OpenAI-compat/FishAudio: responseType='base64' para obter MP3 binário.
     xhr.responseType = (gemini ? 'text' : 'base64') as any;
     xhr.setRequestHeader('Content-Type', 'application/json');
-    // Gemini: header x-goog-api-key (FIX — antes usava ?key= query param,
-    // mas Gemini passa a rejeitar sem header de Authorization para alguns
-    // modelos/versões da API). OpenAI-compat: Bearer token.
-    // FishAudio: Bearer token + model no header.
     if (gemini && apiKey) {
       xhr.setRequestHeader('x-goog-api-key', apiKey);
-    } else if (fish && apiKey) {
-      xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
-      xhr.setRequestHeader('model', model);
-    } else if (!gemini && !fish && apiKey) {
+    } else if (apiKey) {
       xhr.setRequestHeader('Authorization', `Bearer ${apiKey}`);
     }
 
