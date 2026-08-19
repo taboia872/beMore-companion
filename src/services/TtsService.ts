@@ -112,20 +112,25 @@ export interface FishAudioVoice {
 }
 
 /**
- * Busca vozes públicas do FishAudio via GET /model.
- * Retorna array de {id, title, languages}.
- * Paginação via query params page/page_size (default 20).
- */
+ /**
+  * Busca vozes públicas do FishAudio via GET /model.
+  * Retorna array de {id, title, languages}.
+  * @param language — filtro de idioma (ex: 'pt', 'en'). Se fornecido, retorna
+  *                   apenas vozes que suportam este idioma.
+  */
 export async function fetchFishAudioVoices(
   baseUrl: string,
   page = 1,
   pageSize = 50,
+  language?: string,
 ): Promise<FishAudioVoice[]> {
   const clean = baseUrl.trim().replace(/\/+$/, '');
-  // Endpoint é /model (sem /v1) — raiz do domínio
   // Remove /v1 e /tts se presentes (usuário pode ter cadastrado com ambos)
   const root = clean.replace(/\/v1\/tts$/, '').replace(/\/tts$/, '').replace(/\/v1$/, '');
-  const url = `${root}/model?page=${page}&page_size=${pageSize}`;
+  let url = `${root}/model?page=${page}&page_size=${pageSize}`;
+  if (language) {
+    url += `&language=${language}`;
+  }
 
   const res = await fetch(url, {method: 'GET'});
   if (!res.ok) {

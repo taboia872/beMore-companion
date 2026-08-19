@@ -654,7 +654,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
       setFishVoicesLoading(true);
       setTtsVoices([]); // limpa lista fixa
       try {
-        const voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
+        // Busca vozes em português primeiro (filtro do FishAudio)
+        let voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50, 'pt');
+        // Se não há vozes em PT, busca sem filtro
+        if (voices.length === 0) {
+          voices = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
+        }
         setFishVoices(voices);
       } catch (e: any) {
         Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a URL do servidor.');
