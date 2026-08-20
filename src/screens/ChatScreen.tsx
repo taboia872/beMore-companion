@@ -30,6 +30,7 @@ import {streamResponse, abortGeneration} from '../services/LlmService';
 import {useRecorder} from '../hooks/useRecorder';
 import {useWhisper} from '../hooks/useWhisper';
 import {displayModelName} from '../utils/modelName';
+import {getModelBadges} from '../utils/modelCapabilities';
 import {getTextContent, getImageUrls, hasImages} from '../utils/messageContent';
 import Markdown from '@ronradtke/react-native-markdown-display';
 import {launchCamera, launchImageLibrary} from 'react-native-image-picker';
@@ -990,6 +991,22 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
   };
 
   const headerTitle = displayModelName(settings.llm.model) || 'modelo';
+  const headerBadges = getModelBadges(settings.llm.model);
+  // Mapeamento de tipo de badge → cor de fundo e texto
+  const badgeStyleForType = (type: string): {bg: string; text: string; label: string} => {
+    switch (type) {
+      case 'anyToAny':
+        return {bg: '#a371f7', text: '#fff', label: 'ANY→ANY'};
+      case 'stt':
+        return {bg: '#f0883e', text: '#fff', label: 'STT'};
+      case 'tts':
+        return {bg: '#2dd4bf', text: '#0a0a0a', label: 'TTS'};
+      case 'vision':
+        return {bg: '#a371f7', text: '#fff', label: 'VISÃO'};
+      default:
+        return {bg: '#6e7681', text: '#fff', label: type.toUpperCase()};
+    }
+  };
 
   return (
     <SafeAreaView style={s.safe}>
@@ -1001,9 +1018,34 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
 
       {/* Painel superior */}
       <View style={s.header}>
-        <Text style={s.headerTitle} numberOfLines={1}>
-          {headerTitle}
-        </Text>
+        <View style={{flex: 1, marginRight: 12, flexDirection: 'row', alignItems: 'center', gap: 6}}>
+          <Text style={s.headerTitle} numberOfLines={1}>
+            {headerTitle}
+          </Text>
+          {headerBadges.map((badge, idx) => {
+            const bs = badgeStyleForType(badge.type);
+            return (
+              <View
+                key={idx}
+                style={{
+                  backgroundColor: bs.bg,
+                  borderRadius: 4,
+                  paddingHorizontal: 5,
+                  paddingVertical: 1,
+                }}>
+                <Text
+                  style={{
+                    color: bs.text,
+                    fontSize: 9,
+                    fontWeight: '700',
+                    letterSpacing: 0.5,
+                  }}>
+                  {bs.label}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
         <View style={s.headerActions}>
           {/* Novo chat — limpa histórico e contexto atual */}
           <TouchableOpacity
@@ -1457,8 +1499,7 @@ function getStyles(t: ThemeColors) {
       color: t.textSecondary,
       fontSize: 14,
       fontWeight: '600',
-      flex: 1,
-      marginRight: 12,
+      flexShrink: 1,
     },
     iconBtn: {
       padding: 4,

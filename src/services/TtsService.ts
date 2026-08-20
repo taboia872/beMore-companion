@@ -129,12 +129,15 @@ export interface FishAudioVoicesResult {
  * Retorna array de {id, title, languages} + total para paginação.
  * @param language — filtro de idioma (ex: 'pt', 'en'). Se fornecido, retorna
  *                   apenas vozes que suportam este idioma.
+ * @param title — filtro por nome de voz (busca parcial). Se fornecido, retorna
+ *                apenas vozes cujo título contém a string.
  */
 export async function fetchFishAudioVoices(
   baseUrl: string,
   page = 1,
-  pageSize = 50,
+  pageSize = 100,
   language?: string,
+  title?: string,
 ): Promise<FishAudioVoicesResult> {
   const clean = baseUrl.trim().replace(/\/+$/, '');
   // Remove /v1 e /tts se presentes (usuário pode ter cadastrado com ambos)
@@ -142,6 +145,9 @@ export async function fetchFishAudioVoices(
   let url = `${root}/model?page=${page}&page_size=${pageSize}`;
   if (language) {
     url += `&language=${language}`;
+  }
+  if (title && title.trim()) {
+    url += `&title=${encodeURIComponent(title.trim())}`;
   }
 
   const res = await fetch(url, {method: 'GET'});

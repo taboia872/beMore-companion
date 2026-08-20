@@ -41,7 +41,11 @@ import {
   getFishVoices,
   appendFishVoices,
   getFishVoicesLastPage,
+  getFishVoicesTotal,
   clearFishVoices,
+  getFavoriteVoiceIds,
+  toggleVoiceFavorite,
+  setFishVoices as setFishVoicesCache,
 } from '../data/voiceDb';
 import {isKeyExhausted, clearServerCooldown} from '../services/KeyRotation';
 import {getTheme, ThemeColors} from '../utils/theme';
@@ -434,6 +438,11 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
   const [fishVoicesTotal, setFishVoicesTotal] = useState(0);
   const [fishVoicesLoadingMore, setFishVoicesLoadingMore] = useState(false);
   const [fishVoicesTick, setFishVoicesTick] = useState(0);
+  // Busca de vozes por nome (FishAudio)
+  const [voiceSearchQuery, setVoiceSearchQuery] = useState('');
+  const [voiceSearchLoading, setVoiceSearchLoading] = useState(false);
+  // ID do servidor FishAudio cuja lista de vozes está expandida no card Servidores
+  const [expandedVoicesServerId, setExpandedVoicesServerId] = useState<string | null>(null);
 
   // Estado para edição de capabilities de modelo
   const [editingModel, setEditingModel] = useState<ModelEntry | null>(null);
@@ -649,14 +658,14 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     }
     // FishAudio: fetch async de vozes públicas via GET /model
     if (ttsServer.baseUrl.includes('fish.audio')) {
-      // Se já há vozes no cache, mostra as cacheadas em vez de refazer fetch.
+      // Se já há vozes no cache, mostra as cacheadas e restaura hasMore do cache.
       const cached = getFishVoices(ttsServer.id);
       if (cached.length > 0) {
         setFishVoices(cached);
-        // Se o cache não esgotou o total na última busca, mantém hasMore ativo
-        const lastPage = getFishVoicesLastPage(ttsServer.id);
-        // Sempre mostra o botão "Carregar mais" se já tem vozes no cache
-        // — o usuário pode querer paginar
+        const cacheTotal = getFishVoicesTotal(ttsServer.id);
+        setFishVoicesTotal(cacheTotal);
+        // hasMore = se o cache não esgotou o total da última busca
+        setFishVoicesHasMore(cached.length < cacheTotal);
         setFishVoicesTick(t => t + 1);
         return;
       }
@@ -664,16 +673,16 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
       setTtsVoices([]); // limpa lista fixa
       try {
         // Busca vozes em português primeiro (filtro do FishAudio)
-        let result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50, 'pt');
+        let result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 100, 'pt');
         // Se não há vozes em PT, busca sem filtro
         if (result.voices.length === 0) {
-          result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 50);
+          result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 100);
         }
         // Salva no cache (página 1)
         setFishVoices(result.voices);
         setFishVoicesHasMore(result.hasMore);
         setFishVoicesTotal(result.total);
-        appendFishVoices(ttsServer.id, result.voices, result.page);
+        setFishVoicesCache(ttsServer.id, result.voices, result.page, result.total);
         setFishVoicesTick(t => t + 1);
       } catch (e: any) {
         Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a URL do servidor.');
@@ -689,34 +698,18 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     setTtsVoices(voices);
   };
 
-  /** Carrega mais 50 vozes FishAudio (próxima página do cache/API). */
+  /** Carrega mais 100 vozes FishAudio (próxima página). */
   const handleLoadMoreVoices = async () => {
     if (!ttsServer || fishVoicesLoadingMore) return;
     setFishVoicesLoadingMore(true);
     try {
       const lastPage = getFishVoicesLastPage(ttsServer.id);
       const nextPage = lastPage + 1;
-      // Primeiro verifica se já temos no cache (usuário pode ter paginado antes)
-      // Se a próxima página já está no cache, não precisa de fetch.
-      // Como armazenamos em um único array, não sabemos se a próxima página
-      // foi toda carregada. Verificamos se já temos o total ou se o cache
-      // já tem mais vozes que as mostradas.
-      const cached = getFishVoices(ttsServer.id);
-      if (cached.length > fishVoices.length) {
-        // Já temos mais no cache — apenas atualiza a UI
-        setFishVoices(cached);
-        setFishVoicesTick(t => t + 1);
-        return;
-      }
-      // Senão, busca a próxima página da API
-      let result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 50);
-      // Se PT retornou vazio na primeira vez, aqui também pode
-      // Mantém consistência com o handleFetchVoices
-      if (result.voices.length === 0 && nextPage === 2) {
-        result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 50);
-      }
+      // Busca a próxima página da API (sempre sem filtro de idioma ao paginar,
+      // para não limitar resultados)
+      const result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 100);
       if (result.voices.length > 0) {
-        const merged = appendFishVoices(ttsServer.id, result.voices, result.page);
+        const merged = appendFishVoices(ttsServer.id, result.voices, result.page, result.total);
         setFishVoices(merged);
         setFishVoicesHasMore(result.hasMore);
         setFishVoicesTotal(result.total);
@@ -731,6 +724,33 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     }
   };
 
+  /** Busca vozes FishAudio por nome (usa parâmetro title da API). */
+  const handleSearchVoices = async (query: string) => {
+    if (!ttsServer || !query.trim()) {
+      // Se query vazia, volta para o cache
+      if (ttsServer) {
+        const cached = getFishVoices(ttsServer.id);
+        setFishVoices(cached);
+        const cacheTotal = getFishVoicesTotal(ttsServer.id);
+        setFishVoicesTotal(cacheTotal);
+        setFishVoicesHasMore(cached.length < cacheTotal);
+      }
+      return;
+    }
+    setVoiceSearchLoading(true);
+    try {
+      const result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 100, undefined, query.trim());
+      setFishVoices(result.voices);
+      setFishVoicesTotal(result.total);
+      setFishVoicesHasMore(result.hasMore);
+      setFishVoicesTick(t => t + 1);
+    } catch (e: any) {
+      Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a conexão.');
+    } finally {
+      setVoiceSearchLoading(false);
+    }
+  };
+
   /** Limpa o cache de vozes FishAudio e refaz o fetch do zero. */
   const handleRefreshVoices = async () => {
     if (!ttsServer) return;
@@ -739,7 +759,54 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
       setFishVoices([]);
       setFishVoicesHasMore(false);
       setFishVoicesTotal(0);
+      setVoiceSearchQuery('');
       await handleFetchVoices();
+    }
+  };
+
+  /** Alterna favorito de uma voz FishAudio (persiste no voiceDb). */
+  const handleToggleVoiceFavorite = (voiceId: string) => {
+    if (!ttsServer) return;
+    toggleVoiceFavorite(ttsServer.id, voiceId);
+    setFishVoicesTick(t => t + 1);
+  };
+
+  /**
+   * Carrega vozes FishAudio para exibição no card de Servidores (expandir).
+   * Busca do cache se existir; senão faz fetch.
+   */
+  const handleExpandVoices = async (serverId: string) => {
+    // Toggle expand
+    if (expandedVoicesServerId === serverId) {
+      setExpandedVoicesServerId(null);
+      return;
+    }
+    setExpandedVoicesServerId(serverId);
+    const server = getServer(serverId);
+    if (!server) return;
+    const cached = getFishVoices(serverId);
+    if (cached.length > 0) {
+      setFishVoices(cached);
+      const cacheTotal = getFishVoicesTotal(serverId);
+      setFishVoicesTotal(cacheTotal);
+      setFishVoicesHasMore(cached.length < cacheTotal);
+      return;
+    }
+    setFishVoicesLoading(true);
+    try {
+      let result = await fetchFishAudioVoices(server.baseUrl, 1, 100, 'pt');
+      if (result.voices.length === 0) {
+        result = await fetchFishAudioVoices(server.baseUrl, 1, 100);
+      }
+      setFishVoicesCache(serverId, result.voices, result.page, result.total);
+      setFishVoices(result.voices);
+      setFishVoicesTotal(result.total);
+      setFishVoicesHasMore(result.hasMore);
+      setFishVoicesTick(t => t + 1);
+    } catch (e: any) {
+      Alert.alert('Erro ao buscar vozes', e?.message ?? 'Verifique a URL do servidor.');
+    } finally {
+      setFishVoicesLoading(false);
     }
   };
 
@@ -1163,6 +1230,145 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                           </View>
                         </View>
                       )}
+
+                      {/* --- Vozes FishAudio (só para servidores fishaudio) --- */}
+                      {server.format === 'fishaudio' && (
+                        <View style={s.keySection}>
+                          <TouchableOpacity
+                            style={[s.hiddenSectionHeader, {marginBottom: 0}]}
+                            onPress={() => handleExpandVoices(server.id)}>
+                            <Icon
+                              name={expandedVoicesServerId === server.id ? 'expand-less' : 'expand-more'}
+                              size={16}
+                              color={theme.textSecondary}
+                            />
+                            <Icon name="record-voice-over" size={14} color={theme.textSecondary} />
+                            <Text style={s.hiddenSectionText}>
+                              Vozes ({getFavoriteVoiceIds(server.id).length} favoritas)
+                            </Text>
+                          </TouchableOpacity>
+
+                          {expandedVoicesServerId === server.id && (
+                            <View style={{marginTop: 4}}>
+                              {/* Busca por nome */}
+                              <TextInput
+                                style={[s.input, {marginBottom: 6}]}
+                                placeholder="Buscar voz por nome..."
+                                placeholderTextColor={theme.textMuted}
+                                value={voiceSearchQuery}
+                                onChangeText={(v) => {
+                                  setVoiceSearchQuery(v);
+                                }}
+                                onSubmitEditing={(e) => handleSearchVoices(e.nativeEvent.text)}
+                                returnKeyType="search"
+                              />
+
+                              {/* Loading inicial */}
+                              {fishVoicesLoading && (
+                                <View style={{flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8}}>
+                                  <ActivityIndicator size={16} color={theme.accent} />
+                                  <Text style={s.hint}>Buscando vozes...</Text>
+                                </View>
+                              )}
+
+                              {/* Loading de busca */}
+                              {voiceSearchLoading && (
+                                <View style={{flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4}}>
+                                  <ActivityIndicator size={14} color={theme.accent} />
+                                  <Text style={s.hint}>Buscando...</Text>
+                                </View>
+                              )}
+
+                              {/* Lista de vozes */}
+                              {fishVoices.length > 0 && (
+                                <View style={s.dropdownList}>
+                                  {fishVoices.map(fv => {
+                                    const isFav = getFavoriteVoiceIds(server.id).includes(fv.id);
+                                    return (
+                                      <View
+                                        key={fv.id}
+                                        style={[s.dropdownItem, isFav && s.dropdownItemActive]}>
+                                        <Icon
+                                          name={isFav ? 'star' : 'star-border'}
+                                          size={16}
+                                          color={isFav ? '#e3b341' : theme.textMuted}
+                                        />
+                                        <View style={{flex: 1}}>
+                                          <Text
+                                            style={[s.dropdownItemText, isFav && s.dropdownItemTextActive]}
+                                            numberOfLines={1}>
+                                            {fv.title}
+                                          </Text>
+                                          {fv.languages && fv.languages.length > 0 && (
+                                            <Text style={s.hint} numberOfLines={1}>
+                                              {fv.languages.join(', ')}
+                                            </Text>
+                                          )}
+                                        </View>
+                                        <TouchableOpacity
+                                          style={s.favBtn}
+                                          onPress={() => handleToggleVoiceFavorite(fv.id)}
+                                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                                          <Icon
+                                            name={isFav ? 'star' : 'star-border'}
+                                            size={18}
+                                            color={isFav ? '#e3b341' : theme.textMuted}
+                                          />
+                                        </TouchableOpacity>
+                                      </View>
+                                    );
+                                  })}
+                                </View>
+                              )}
+
+                              {/* Carregar mais vozes */}
+                              {fishVoices.length === 0 && !fishVoicesLoading && !voiceSearchLoading && (
+                                <Text style={s.hint}>Nenhuma voz encontrada.</Text>
+                              )}
+                              {fishVoicesHasMore && !voiceSearchLoading && (
+                                <TouchableOpacity
+                                  style={[s.addServerBtn, {marginTop: 4}]}
+                                  onPress={() => {
+                                    // Reutiliza handleLoadMoreVoices mas precisa setar ttsServer
+                                    // Como estamos fora do contexto ttsServer, faz fetch direto
+                                    const lastPage = getFishVoicesLastPage(server.id);
+                                    const nextPage = lastPage + 1;
+                                    setFishVoicesLoadingMore(true);
+                                    fetchFishAudioVoices(server.baseUrl, nextPage, 100)
+                                      .then(result => {
+                                        if (result.voices.length > 0) {
+                                          const merged = appendFishVoices(server.id, result.voices, result.page, result.total);
+                                          setFishVoices(merged);
+                                          setFishVoicesHasMore(result.hasMore);
+                                          setFishVoicesTotal(result.total);
+                                          setFishVoicesTick(t => t + 1);
+                                        } else {
+                                          setFishVoicesHasMore(false);
+                                        }
+                                      })
+                                      .catch(e => Alert.alert('Erro ao carregar mais vozes', e?.message ?? ''))
+                                      .finally(() => setFishVoicesLoadingMore(false));
+                                  }}
+                                  disabled={fishVoicesLoadingMore}>
+                                  {fishVoicesLoadingMore ? (
+                                    <ActivityIndicator size={14} color={theme.accent} />
+                                  ) : (
+                                    <Icon name="add" size={16} color={theme.accent} />
+                                  )}
+                                  <Text style={s.addServerBtnText}>
+                                    {fishVoicesLoadingMore ? 'Carregando...' : 'Carregar mais 100 vozes'}
+                                  </Text>
+                                </TouchableOpacity>
+                              )}
+                              {fishVoicesTotal > 0 && (
+                                <Text style={[s.hint, {textAlign: 'center', marginTop: 4}]}>
+                                  {fishVoices.length} de {fishVoicesTotal} vozes
+                                </Text>
+                              )}
+                            </View>
+                          )}
+                        </View>
+                      )}
                     </View>
                   );
                 })}
@@ -1237,17 +1443,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                           )}
                         </View>
                       </View>
-                      {/* Toggle favorito */}
-                      <TouchableOpacity
-                        onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
-                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                        style={s.favBtn}>
-                        <Icon
-                          name={model.isFavorite ? 'star' : 'star-border'}
-                          size={20}
-                          color={model.isFavorite ? '#e3b341' : theme.textMuted}
-                        />
-                      </TouchableOpacity>
                       {isActive && (
                         <Icon name="check" size={18} color="#3fb950" />
                       )}
@@ -1323,17 +1518,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                               )}
                             </View>
                           </View>
-                          {/* Toggle favorito */}
-                          <TouchableOpacity
-                            onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
-                            hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                            style={s.favBtn}>
-                            <Icon
-                              name={model.isFavorite ? 'star' : 'star-border'}
-                              size={20}
-                              color={model.isFavorite ? '#e3b341' : theme.textMuted}
-                            />
-                          </TouchableOpacity>
                           {isActive && (
                             <Icon name="check" size={18} color="#3fb950" />
                           )}
@@ -1408,17 +1592,6 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                           )}
                         </View>
                       </View>
-                      {/* Toggle favorito */}
-                      <TouchableOpacity
-                        onPress={(e) => { e.stopPropagation?.(); toggleFavorite(model); }}
-                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                        style={s.favBtn}>
-                        <Icon
-                          name={model.isFavorite ? 'star' : 'star-border'}
-                          size={20}
-                          color={model.isFavorite ? '#e3b341' : theme.textMuted}
-                        />
-                      </TouchableOpacity>
                       {isActive && (
                         <Icon name="check" size={18} color="#3fb950" />
                       )}
@@ -1447,12 +1620,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                 disabled={!ttsServer || !activeTtsModel}>
                 <Icon name="record-voice-over" size={20} color={theme.accent} />
                 <Text style={s.dropdownBtnText} numberOfLines={1}>
-                  {settingsV2.ttsVoice || 'Buscar vozes disponíveis'}
+                  {settingsV2.ttsVoice || 'Selecionar voz'}
                 </Text>
                 <Icon name="expand-more" size={18} color={theme.textSecondary} />
               </TouchableOpacity>
               {/* Botão refresh — limpa cache e refaz fetch (FishAudio) */}
-              {ttsServer && ttsServer.baseUrl.includes('fish.audio') && fishVoices.length > 0 && (
+              {ttsServer && ttsServer.baseUrl.includes('fish.audio') && (
                 <TouchableOpacity
                   style={[s.favBtn, {marginTop: 2}]}
                   onPress={handleRefreshVoices}
@@ -1463,8 +1636,9 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
               )}
             </View>
             <Text style={s.hint}>
-              Toque para carregar as vozes disponíveis. Selecione uma voz para
-              testar e definir.
+              {ttsServer && ttsServer.baseUrl.includes('fish.audio')
+                ? 'Favorita vozes no card de Servidores para vê-las aqui.'
+                : 'Selecione uma voz para testar e definir.'}
             </Text>
 
             {/* Lista de vozes com botão de teste (OpenAI/Gemini — fixas) */}
@@ -1520,90 +1694,71 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
               </View>
             )}
 
-            {/* Lista de vozes FishAudio (fetch async — title + id) */}
-            {fishVoices.length > 0 && (
-              <View style={s.dropdownList}>
-                {fishVoices.map(fv => {
-                  const isActive = fv.id === (settingsV2.ttsVoice ?? '');
-                  const isTesting = testingVoice === fv.id;
-                  return (
-                    <View
-                      key={fv.id}
-                      style={[s.dropdownItem, isActive && s.dropdownItemActive]}>
-                      <TouchableOpacity
-                        style={{flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8}}
-                        onPress={() => onChangeV2({ttsVoice: fv.id})}>
-                        <Icon
-                          name={isActive ? 'check-circle' : 'radio-button-unchecked'}
-                          size={18}
-                          color={isActive ? '#3fb950' : theme.textSecondary}
-                        />
-                        <View style={{flex: 1}}>
-                          <Text
-                            style={[
-                              s.dropdownItemText,
-                              isActive && s.dropdownItemTextActive,
-                            ]}
-                            numberOfLines={1}>
-                            {fv.title}
-                          </Text>
-                          {fv.languages && fv.languages.length > 0 && (
-                            <Text style={s.hint} numberOfLines={1}>
-                              {fv.languages.join(', ')}
-                            </Text>
-                          )}
-                        </View>
-                      </TouchableOpacity>
-                      {/* Botão de teste */}
-                      <TouchableOpacity
-                        style={s.favBtn}
-                        onPress={() => handleTestVoice(fv.id)}
-                        disabled={isTesting || !ttsServer || !activeTtsModel}
-                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
-                        {isTesting ? (
-                          <ActivityIndicator size={16} color={theme.accent} />
-                        ) : (
-                          <Icon name="play-arrow" size={20} color={theme.accent} />
-                        )}
-                      </TouchableOpacity>
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-
-            {/* Botão "Carregar mais 50 vozes" (FishAudio — paginação) */}
-            {fishVoices.length > 0 && ttsServer && ttsServer.baseUrl.includes('fish.audio') && (
-              <>
-                {fishVoicesTotal > 0 && (
-                  <Text style={[s.hint, {textAlign: 'center', marginVertical: 4}]}>
-                    {fishVoices.length} de {fishVoicesTotal} vozes
+            {/* Lista de vozes FishAudio — apenas FAVORITAS (seleção) */}
+            {ttsServer && ttsServer.baseUrl.includes('fish.audio') && !fishVoicesLoading && (() => {
+              const favIds = getFavoriteVoiceIds(ttsServer.id);
+              const cached = getFishVoices(ttsServer.id);
+              const favVoices = cached.filter(v => favIds.includes(v.id));
+              void fishVoicesTick; // re-render trigger
+              if (favVoices.length === 0) {
+                return (
+                  <Text style={s.hint}>
+                    Nenhuma voz favorita. Expanda o servidor FishAudio em
+                    "Servidores" para favoritar vozes.
                   </Text>
-                )}
-                {fishVoicesHasMore && (
-                  <TouchableOpacity
-                    style={[s.dropdownBtn, {marginTop: 4, justifyContent: 'center'}]}
-                    onPress={handleLoadMoreVoices}
-                    disabled={fishVoicesLoadingMore}>
-                    {fishVoicesLoadingMore ? (
-                      <>
-                        <ActivityIndicator size={16} color={theme.accent} />
-                        <Text style={[s.dropdownBtnText, {marginLeft: 8}]}>
-                          Carregando...
-                        </Text>
-                      </>
-                    ) : (
-                      <>
-                        <Icon name="add" size={18} color={theme.accent} />
-                        <Text style={[s.dropdownBtnText, {marginLeft: 4}]}>
-                          Carregar mais 50 vozes
-                        </Text>
-                      </>
-                    )}
-                  </TouchableOpacity>
-                )}
-              </>
-            )}
+                );
+              }
+              return (
+                <View style={s.dropdownList}>
+                  {favVoices.map(fv => {
+                    const isActive = fv.id === (settingsV2.ttsVoice ?? '');
+                    const isTesting = testingVoice === fv.id;
+                    return (
+                      <View
+                        key={fv.id}
+                        style={[s.dropdownItem, isActive && s.dropdownItemActive]}>
+                        <TouchableOpacity
+                          style={{flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8}}
+                          onPress={() => onChangeV2({ttsVoice: fv.id})}>
+                          <Icon
+                            name={isActive ? 'check-circle' : 'radio-button-unchecked'}
+                            size={18}
+                            color={isActive ? '#3fb950' : theme.textSecondary}
+                          />
+                          <View style={{flex: 1}}>
+                            <Text
+                              style={[
+                                s.dropdownItemText,
+                                isActive && s.dropdownItemTextActive,
+                              ]}
+                              numberOfLines={1}>
+                              {fv.title}
+                            </Text>
+                            {fv.languages && fv.languages.length > 0 && (
+                              <Text style={s.hint} numberOfLines={1}>
+                                {fv.languages.join(', ')}
+                              </Text>
+                            )}
+                          </View>
+                        </TouchableOpacity>
+                        {/* Botão de teste */}
+                        <TouchableOpacity
+                          style={s.favBtn}
+                          onPress={() => handleTestVoice(fv.id)}
+                          disabled={isTesting || !ttsServer || !activeTtsModel}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                          {isTesting ? (
+                            <ActivityIndicator size={16} color={theme.accent} />
+                          ) : (
+                            <Icon name="play-arrow" size={20} color={theme.accent} />
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            })()}
           </Card>
 
           {/* ====================================================== */}
