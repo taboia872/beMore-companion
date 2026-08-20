@@ -640,7 +640,7 @@ export function ChatScreen({settings, settingsV2, messages, setMessages, onOpenS
           Alert.alert('STT não configurado', msg);
           return;
         }
-        const transcript = await whisper.transcribe(path, settings);
+        const transcript = await whisper.transcribe(path, settings, settingsV2);
         if (transcript && transcript.trim()) {
           setInput(transcript.trim());
         } else if (whisper.errorMessage) {

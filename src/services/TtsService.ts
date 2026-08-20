@@ -607,11 +607,15 @@ export function isSpeaking(): boolean {
  *
  * @param params Mesmos parâmetros de speakText, mas input é ignorado
  *               (usa uma frase fixa de teste).
+ * @param testText Texto opcional para o teste (padrão: 'Olá, este é um teste de voz').
  */
-export function testVoice(params: Omit<TtsParams, 'input'>): Promise<void> {
+export function testVoice(
+  params: Omit<TtsParams, 'input'>,
+  testText?: string,
+): Promise<void> {
   stopSpeaking();
   return speakText({
     ...params,
-    input: 'Olá! Esta é uma teste de voz.',
+    input: testText ?? 'Olá, este é um teste de voz.',
   });
 }

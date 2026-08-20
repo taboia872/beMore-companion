@@ -8,8 +8,10 @@ import {
   isSttOnlineAvailable,
   transcribeAudioOnline,
 } from '../services/SttOnlineService';
-import {AppSettings} from '../types';
-import {loadApiKeyForServer} from '../data/appSettings';
+import {AppSettings, AppSettingsV2} from '../types';
+import {getServer} from '../data/serverDb';
+import {getModel} from '../data/modelDb';
+import {loadApiKey} from '../data/keychainDb';
 
 export type WhisperStatus =
   | 'idle'
@@ -27,8 +29,11 @@ export interface UseWhisper {
    * - on-device: usa whisper.rn com sttModelPath
    * - online: usa API de transcrição (Groq/OpenAI-compat) com sttOnlineModel
    *   e reutiliza baseUrl+apiKey do LLM (ou sttServerOverride se definido)
+   *
+   * @param settingsV2 Configurações V2 — usada para resolver o servidor STT
+   *                   e sua API key (que pode ser diferente do servidor LLM).
    */
-  transcribe: (wavPath: string, settings: AppSettings) => Promise<string | null>;
+  transcribe: (wavPath: string, settings: AppSettings, settingsV2: AppSettingsV2) => Promise<string | null>;
   reset: () => void;
   releaseModel: () => void;
 }
@@ -48,11 +53,11 @@ export function useWhisper(): UseWhisper {
   const [lastTranscript, setLastTranscript] = useState<string | null>(null);
 
   const transcribe = useCallback(
-    async (wavPath: string, settings: AppSettings): Promise<string | null> => {
+    async (wavPath: string, settings: AppSettings, settingsV2: AppSettingsV2): Promise<string | null> => {
       const mode = settings.sttMode ?? 'online';
 
       if (mode === 'online') {
-        return transcribeOnline(wavPath, settings, setStatus, setErrorMessage, setLastTranscript);
+        return transcribeOnline(wavPath, settings, settingsV2, setStatus, setErrorMessage, setLastTranscript);
       }
       return transcribeOnDevice(wavPath, settings, setStatus, setErrorMessage, setLastTranscript);
     },
@@ -115,14 +120,19 @@ async function transcribeOnDevice(
 async function transcribeOnline(
   wavPath: string,
   settings: AppSettings,
+  settingsV2: AppSettingsV2,
   setStatus: (s: WhisperStatus) => void,
   setErrorMessage: (e: string | null) => void,
   setLastTranscript: (t: string | null) => void,
 ): Promise<string | null> {
-  const model = settings.sttOnlineModel ?? '';
+  // Resolve modelo STT do V2 (mais confiável que settings.sttOnlineModel)
+  const sttModel = settingsV2.activeSttModelId
+    ? getModel(settingsV2.activeSttModelId)
+    : null;
+  const model = sttModel?.modelId ?? settings.sttOnlineModel ?? '';
   if (!model) {
     setStatus('error');
-    setErrorMessage('Modelo STT online não selecionado. Escolha um nas configurações.');
+    setErrorMessage('Modelo STT não selecionado. Escolha um nas configurações.');
     return null;
   }
   if (!isSttOnlineAvailable()) {
@@ -131,16 +141,19 @@ async function transcribeOnline(
     return null;
   }
 
-  // Determina baseUrl e apiKey:
-  // - Se sttServerOverride está definido, usa ele (com apiKey do Keychain daquele hostname)
-  // - Senão, reutiliza baseUrl+apiKey do servidor LLM atual
-  let baseUrl: string;
-  let apiKey: string;
-  if (settings.sttServerOverride && settings.sttServerOverride.trim()) {
-    baseUrl = settings.sttServerOverride.trim();
-    apiKey = await loadApiKeyForServer(baseUrl);
-  } else {
-    baseUrl = settings.llm.baseUrl;
+  // Resolve baseUrl e apiKey do servidor STT usando V2:
+  // - sttServerId explícito, senão cai para o activeServerId (chat server)
+  // - apiKey do Keychain (V2 — keyed by serverId+keyIndex)
+  const sttServerId = settingsV2.sttServerId ?? settingsV2.activeServerId;
+  const sttServer = sttServerId ? getServer(sttServerId) : null;
+  const baseUrl = sttServer?.baseUrl ?? settings.llm.baseUrl ?? '';
+
+  let apiKey = '';
+  if (sttServer && sttServer.apiKeyCount > 0) {
+    apiKey = await loadApiKey(sttServer.id, sttServer.activeKeyIndex);
+  }
+  // Fallback: se STT == servidor de chat, usa a apiKey legada do settings
+  if (!apiKey && settingsV2.sttServerId === null) {
     apiKey = settings.llm.apiKey ?? '';
   }
 

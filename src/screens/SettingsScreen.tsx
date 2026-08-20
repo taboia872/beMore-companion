@@ -698,24 +698,47 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     setTtsVoices(voices);
   };
 
-  /** Carrega mais 100 vozes FishAudio (próxima página). */
-  const handleLoadMoreVoices = async () => {
-    if (!ttsServer || fishVoicesLoadingMore) return;
+  /** Carrega mais 100 vozes FishAudio (próxima página).
+   *  Como a API retorna vozes em ordem aleatória, páginas podem ter duplicatas.
+   *  Itera até achar vozes realmente novas ou esgotar o total. */
+  const handleLoadMoreVoices = async (serverIdOverride?: string) => {
+    const srvId = serverIdOverride ?? ttsServer?.id;
+    const srvBaseUrl = serverIdOverride
+      ? getServer(serverIdOverride)?.baseUrl
+      : ttsServer?.baseUrl;
+    if (!srvId || !srvBaseUrl || fishVoicesLoadingMore) return;
     setFishVoicesLoadingMore(true);
     try {
-      const lastPage = getFishVoicesLastPage(ttsServer.id);
-      const nextPage = lastPage + 1;
-      // Busca a próxima página da API (sempre sem filtro de idioma ao paginar,
-      // para não limitar resultados)
-      const result = await fetchFishAudioVoices(ttsServer.baseUrl, nextPage, 100);
-      if (result.voices.length > 0) {
-        const merged = appendFishVoices(ttsServer.id, result.voices, result.page, result.total);
+      let currentPage = getFishVoicesLastPage(srvId);
+      let result = await fetchFishAudioVoices(srvBaseUrl, currentPage + 1, 100);
+      let attempts = 0;
+      const beforeCount = getFishVoices(srvId).length;
+      // Itera até achar vozes novas, ou esgotar, ou 5 tentativas (safety)
+      while (result.voices.length > 0 && result.hasMore && attempts < 5) {
+        const merged = appendFishVoices(srvId, result.voices, result.page, result.total);
+        if (merged.length > beforeCount) {
+          // Achou vozes novas — atualiza e para
+          setFishVoices(merged);
+          setFishVoicesHasMore(result.hasMore);
+          setFishVoicesTotal(result.total);
+          setFishVoicesTick(t => t + 1);
+          return;
+        }
+        // Todas duplicadas — próxima página
+        currentPage = result.page;
+        result = await fetchFishAudioVoices(srvBaseUrl, currentPage + 1, 100);
+        attempts++;
+      }
+      // Se chegou aqui, ou não há mais, ou tentou 5x sem achar novas
+      if (result.voices.length === 0 || !result.hasMore) {
+        setFishVoicesHasMore(false);
+      } else {
+        // Atualiza mesmo assim (pode ter algumas poucas novas)
+        const merged = appendFishVoices(srvId, result.voices, result.page, result.total);
         setFishVoices(merged);
         setFishVoicesHasMore(result.hasMore);
         setFishVoicesTotal(result.total);
         setFishVoicesTick(t => t + 1);
-      } else {
-        setFishVoicesHasMore(false);
       }
     } catch (e: any) {
       Alert.alert('Erro ao carregar mais vozes', e?.message ?? 'Verifique a conexão.');
@@ -724,7 +747,8 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     }
   };
 
-  /** Busca vozes FishAudio por nome (usa parâmetro title da API). */
+  /** Busca vozes FishAudio por nome (usa parâmetro title da API).
+   *  Vozes encontradas são mergeadas no cache para que favoritos persistam. */
   const handleSearchVoices = async (query: string) => {
     if (!ttsServer || !query.trim()) {
       // Se query vazia, volta para o cache
@@ -740,6 +764,19 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
     setVoiceSearchLoading(true);
     try {
       const result = await fetchFishAudioVoices(ttsServer.baseUrl, 1, 100, undefined, query.trim());
+      // Mergea as vozes buscadas no cache (sem sobrescrever as existentes)
+      // Isso garante que favoritar uma voz da busca persista no seletor
+      if (result.voices.length > 0) {
+        const existing = getFishVoices(ttsServer.id);
+        const existingIds = new Set(existing.map(v => v.id));
+        const newVoices = result.voices.filter(v => !existingIds.has(v.id));
+        if (newVoices.length > 0) {
+          // Adiciona ao cache sem mudar lastPage/total (busca não é paginação)
+          const allCached = [...existing, ...newVoices];
+          setFishVoicesCache(ttsServer.id, allCached, getFishVoicesLastPage(ttsServer.id), getFishVoicesTotal(ttsServer.id));
+        }
+      }
+      // Mostra só as vozes da busca (não as cacheadas)
       setFishVoices(result.voices);
       setFishVoicesTotal(result.total);
       setFishVoicesHasMore(result.hasMore);
@@ -1279,20 +1316,48 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                                 </View>
                               )}
 
-                              {/* Lista de vozes */}
+                              {/* Lista de vozes — botão play (esquerda) + estrela favorito (direita) */}
                               {fishVoices.length > 0 && (
                                 <View style={s.dropdownList}>
                                   {fishVoices.map(fv => {
                                     const isFav = getFavoriteVoiceIds(server.id).includes(fv.id);
+                                    const isTesting = testingVoice === fv.id;
                                     return (
                                       <View
                                         key={fv.id}
                                         style={[s.dropdownItem, isFav && s.dropdownItemActive]}>
-                                        <Icon
-                                          name={isFav ? 'star' : 'star-border'}
-                                          size={16}
-                                          color={isFav ? '#e3b341' : theme.textMuted}
-                                        />
+                                        {/* Botão de teste (play) */}
+                                        <TouchableOpacity
+                                          style={s.favBtn}
+                                          onPress={() => {
+                                            // Testa a voz usando o próprio servidor FishAudio
+                                            // como servidor TTS temporário
+                                            setTestingVoice(fv.id);
+                                            loadApiKey(server.id, server.activeKeyIndex)
+                                              .then(apiKey =>
+                                                testVoice(
+                                                  {
+                                                    baseUrl: server.baseUrl,
+                                                    apiKey,
+                                                    model: 's2.1-pro-free',
+                                                    voice: fv.id,
+                                                  },
+                                                  'Olá, este é um teste de voz',
+                                                ),
+                                              )
+                                              .catch(e =>
+                                                Alert.alert('Erro ao testar voz', e?.message ?? ''),
+                                              )
+                                              .finally(() => setTestingVoice(null));
+                                          }}
+                                          disabled={isTesting}
+                                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                                          {isTesting ? (
+                                            <ActivityIndicator size={16} color={theme.accent} />
+                                          ) : (
+                                            <Icon name="play-arrow" size={18} color={theme.accent} />
+                                          )}
+                                        </TouchableOpacity>
                                         <View style={{flex: 1}}>
                                           <Text
                                             style={[s.dropdownItemText, isFav && s.dropdownItemTextActive]}
@@ -1305,6 +1370,7 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                                             </Text>
                                           )}
                                         </View>
+                                        {/* Toggle favorito (estrela) */}
                                         <TouchableOpacity
                                           style={s.favBtn}
                                           onPress={() => handleToggleVoiceFavorite(fv.id)}
@@ -1328,32 +1394,12 @@ export function SettingsScreen({settingsV2, onChangeV2, onClose, onAddServer}: P
                               {fishVoicesHasMore && !voiceSearchLoading && (
                                 <TouchableOpacity
                                   style={[s.addServerBtn, {marginTop: 4}]}
-                                  onPress={() => {
-                                    // Reutiliza handleLoadMoreVoices mas precisa setar ttsServer
-                                    // Como estamos fora do contexto ttsServer, faz fetch direto
-                                    const lastPage = getFishVoicesLastPage(server.id);
-                                    const nextPage = lastPage + 1;
-                                    setFishVoicesLoadingMore(true);
-                                    fetchFishAudioVoices(server.baseUrl, nextPage, 100)
-                                      .then(result => {
-                                        if (result.voices.length > 0) {
-                                          const merged = appendFishVoices(server.id, result.voices, result.page, result.total);
-                                          setFishVoices(merged);
-                                          setFishVoicesHasMore(result.hasMore);
-                                          setFishVoicesTotal(result.total);
-                                          setFishVoicesTick(t => t + 1);
-                                        } else {
-                                          setFishVoicesHasMore(false);
-                                        }
-                                      })
-                                      .catch(e => Alert.alert('Erro ao carregar mais vozes', e?.message ?? ''))
-                                      .finally(() => setFishVoicesLoadingMore(false));
-                                  }}
+                                  onPress={() => handleLoadMoreVoices(server.id)}
                                   disabled={fishVoicesLoadingMore}>
                                   {fishVoicesLoadingMore ? (
                                     <ActivityIndicator size={14} color={theme.accent} />
                                   ) : (
-                                    <Icon name="add" size={16} color={theme.accent} />
+                                    <Icon name="add" size={16} color={theme.accentText} />
                                   )}
                                   <Text style={s.addServerBtnText}>
                                     {fishVoicesLoadingMore ? 'Carregando...' : 'Carregar mais 100 vozes'}
